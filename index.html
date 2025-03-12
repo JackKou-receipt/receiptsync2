@@ -12,7 +12,6 @@
         .file-entry { margin: 5px 0; }
     </style>
     <!-- Free Libraries -->
-    <script src="https://unpkg.com/tesseract.js@4.0.0/dist/tesseract.min.js"></script>
     <script src="https://unpkg.com/papaparse@5.3.0/papaparse.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.4/moment.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/moment-timezone/0.5.43/moment-timezone-with-data.min.js"></script>
@@ -47,6 +46,7 @@
     <script>
         let receipts = [];
         let transactions = [];
+        const GOOGLE_VISION_API_KEY = 'AIzaSyDczppCYNM_GUxAkk2NRA2SOrAyEf3witM'; // Replace with your new API key
 
         // Timezone mapping
         const timezones = {
@@ -101,13 +101,13 @@
                 if (file.type === 'application/pdf') {
                     text = await extractTextFromPDF(file);
                 } else {
-                    const { data } = await Tesseract.recognize(file, 'eng');
-                    text = data.text;
+                    text = await extractTextFromImage(file);
                 }
                 const receipt = parseReceipt(text, location);
                 receipts.push({ file, ...receipt });
                 document.getElementById('output').innerText += 
-                    `Receipt: ${receipt.date}, ${receipt.amount} ${receipt.currency}, ${receipt.merchant}, ${location}\n`;
+                    `Raw OCR for ${file.name}: ${text}\n` +
+                    `Receipt: ${receipt.date || 'Invalid date'}, ${receipt.amount} ${receipt.currency}, ${receipt.merchant}, ${location}\n`;
             }
         }
 
@@ -125,32 +125,92 @@
             return fullText;
         }
 
+        // Extract text from image using Google Cloud Vision API
+        async function extractTextFromImage(file) {
+            try {
+                // Convert image to base64
+                const reader = new FileReader();
+                const base64Image = await new Promise((resolve) => {
+                    reader.onload = () => resolve(reader.result.split(',')[1]);
+                    reader.readAsDataURL(file);
+                });
+
+                // Prepare request for Google Cloud Vision API
+                const requestBody = {
+                    requests: [
+                        {
+                            image: {
+                                content: base64Image
+                            },
+                            features: [
+                                {
+                                    type: "TEXT_DETECTION",
+                                    maxResults: 1
+                                }
+                            ],
+                            imageContext: {
+                                languageHints: ["en", "zh-TW"] // English and Traditional Chinese
+                            }
+                        }
+                    ]
+                };
+
+                // Send request to Google Cloud Vision API
+                const response = await fetch(
+                    `https://vision.googleapis.com/v1/images:annotate?key=${GOOGLE_VISION_API_KEY}`,
+                    {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify(requestBody)
+                    }
+                );
+
+                const data = await response.json();
+                if (data.responses && data.responses[0].fullTextAnnotation) {
+                    return data.responses[0].fullTextAnnotation.text;
+                } else {
+                    throw new Error('No text detected by Google Vision API');
+                }
+            } catch (error) {
+                console.error('Google Vision API error:', error);
+                document.getElementById('output').innerText += `Error processing ${file.name}: ${error.message}\n`;
+                return '';
+            }
+        }
+
         // Parse receipt text with smart currency detection
         function parseReceipt(text, location) {
-            const dateMatch = text.match(/(\d{2}[-\/]\d{2}[-\/]\d{4}|\d{4}[-\/]\d{2}[-\/]\d{2})/) || ['Unknown'];
-            const amountMatch = text.match(/(\$|NT\$|NTD|¥|CNY)?\s*[\d.,]+/) || ['Unknown'];
-            const merchantMatch = text.match(/(?:Merchant|Store|Paid to|[A-Z][a-z]+):?\s*([^\n]+)/i) || ['Unknown'];
-            
+            // More flexible date patterns
+            const dateMatch = text.match(
+                /(\d{4}[-\/]\d{2}[-\/]\d{2}|\d{2}[-\/]\d{2}[-\/]\d{4}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}(?:st|nd|rd|th)?\s+\d{4})/i
+            ) || ['Unknown'];
+
+            // Look for amount with currency (e.g., NT$341.00, TWD 140, $246)
+            const amountMatch = text.match(/(?:NT\$|TWD|\$)\s*([\d,]+\.?\d*)/i) || ['Unknown', '0'];
+            const merchantMatch = text.match(/(?:Uber\s*Eats|UberX|THSR|Jewel\s*Changi|[A-Za-z\s]+(?:\s*Restaurant)?|[^\n]+(?=Completed))/i) || ['Unknown', 'Unknown'];
+
             let rawAmount = amountMatch[0] || 'Unknown';
-            let amount = rawAmount.replace(/[^0-9.]/g, '');
+            let amount = amountMatch[1].replace(/,/g, ''); // Remove commas from amounts like 1,330
             let currency;
 
-            if (rawAmount.includes('$') && !rawAmount.includes('NT$')) {
-                currency = 'USD';
-            } else if (rawAmount.includes('NT$') || rawAmount.includes('NTD')) {
+            if (rawAmount.includes('NT$') || rawAmount.includes('TWD')) {
                 currency = 'NTD';
-            } else if (rawAmount.includes('¥') || rawAmount.includes('CNY')) {
-                currency = 'CNY';
+            } else if (rawAmount.includes('$') && location === 'United States') {
+                currency = 'USD';
             } else {
                 currency = defaultCurrencies[location];
             }
 
-            const localDate = moment.tz(dateMatch[1], 'MM/DD/YYYY', timezones[location]);
-            const pacificDate = localDate.clone().tz('America/Los_Angeles').format('M/DD/YY'); // Match CSV format
+            // Try to parse date with multiple formats
+            let localDate = moment(dateMatch[0], ['YYYY/MM/DD', 'MM/DD/YYYY', 'MMM DD YYYY'], true);
+            if (!localDate.isValid()) localDate = moment(dateMatch[0], ['DD-MMM-YYYY', 'YYYY-MMM-DD'], true);
+            const pacificDate = localDate.isValid() ? localDate.clone().tz('America/Los_Angeles').format('M/DD/YY') : 'Invalid date';
 
             return {
                 date: pacificDate,
-                localDate: dateMatch[1],
+                localDate: dateMatch[0],
                 amount: amount || 'Unknown',
                 currency: currency,
                 merchant: merchantMatch[1]?.trim() || 'Unknown',
@@ -180,6 +240,7 @@
 
         // Convert to USD using historical exchange rate (for output only)
         async function convertToUSD(amount, date, currency) {
+            if (date === 'Invalid date') return amount; // Skip conversion if date is invalid
             const [day, month, year] = date.includes('/') ? date.split('/') : date.split('-');
             const formattedDate = `${year.padStart(4, '20')}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
             
@@ -212,13 +273,13 @@
                 const match = transactions.find(t => {
                     const csvDate = moment(t.date, 'M/DD/YY');
                     const receiptDate = moment(receipt.date, 'M/DD/YY');
+                    if (!csvDate.isValid() || !receiptDate.isValid()) return false;
                     const dateDiff = Math.abs(csvDate.diff(receiptDate, 'days'));
                     const csvAmount = parseFloat(t.sourceAmount);
                     const csvCurrency = t.sourceCurrency;
                     const isUberRelated = t.merchant.toLowerCase().includes('uber');
-                    const isUberEatsReceipt = receipt.merchant === '一款舒肥健康餐';
+                    const isUberEatsReceipt = receipt.merchant.toLowerCase().includes('uber eats') || receipt.merchant === '一款舒肥健康餐';
                     
-                    // Match if amounts and currencies match, and either merchants match or it's an Uber Eats receipt with an Uber vendor
                     return dateDiff <= 1 && csvAmount === receiptAmount && csvCurrency === receipt.currency &&
                            (t.merchant === receipt.merchant || (isUberEatsReceipt && isUberRelated));
                 });
