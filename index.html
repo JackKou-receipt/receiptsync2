@@ -146,7 +146,7 @@
             }
 
             const localDate = moment.tz(dateMatch[1], 'MM/DD/YYYY', timezones[location]);
-            const pacificDate = localDate.clone().tz('America/Los_Angeles').format('MM/DD/YYYY');
+            const pacificDate = localDate.clone().tz('America/Los_Angeles').format('M/DD/YY'); // Match CSV format
 
             return {
                 date: pacificDate,
@@ -167,7 +167,7 @@
                 header: true,
                 complete: (result) => {
                     transactions = result.data.map(t => ({
-                        date: t['Post Date'] || t['Purchase Date'] || '',
+                        date: t['Purchase Date'] || t['Post Date'] || '', // Prefer Purchase Date
                         amount: t['Item Total']?.replace('$', '') || '0',
                         merchant: t['Vendor Name'] || 'Unknown'
                     }));
@@ -191,7 +191,7 @@
                 return (parseFloat(amount) * rate).toFixed(2);
             } catch (error) {
                 console.error('Rate fetch failed:', error);
-                return amount;
+                return amount; // Fallback to original amount if API fails
             }
         }
 
@@ -204,10 +204,19 @@
             let csvContent = 'Date,Local Date,Amount (USD),Merchant,Original Currency,Location,Match Status\n';
 
             for (let receipt of receipts) {
-                const match = transactions.find(t => 
-                    t.date === receipt.date && parseFloat(t.amount) === parseFloat(receipt.amount)
-                );
                 const usdAmount = await convertToUSD(receipt.amount, receipt.date, receipt.currency);
+                const receiptAmount = parseFloat(usdAmount);
+                
+                // Find a match with ±1 day and ±0.5 USD tolerance
+                const match = transactions.find(t => {
+                    const csvDate = moment(t.date, 'M/DD/YY');
+                    const receiptDate = moment(receipt.date, 'M/DD/YY');
+                    const dateDiff = Math.abs(csvDate.diff(receiptDate, 'days'));
+                    const csvAmount = parseFloat(t.amount);
+                    const amountDiff = Math.abs(csvAmount - receiptAmount);
+                    return dateDiff <= 1 && amountDiff <= 0.5;
+                });
+
                 const status = match ? 'Matched' : 'No Match';
                 const row = [
                     `"${receipt.date}"`,
