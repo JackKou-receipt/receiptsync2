@@ -9,6 +9,7 @@
         .section { margin-bottom: 20px; }
         button { padding: 10px; }
         #output { white-space: pre-wrap; }
+        .file-entry { margin: 5px 0; }
     </style>
     <!-- Free Libraries -->
     <script src="https://unpkg.com/tesseract.js@4.0.0/dist/tesseract.min.js"></script>
@@ -22,14 +23,8 @@
 
     <div class="section">
         <h3>Step 1: Upload Receipt Files (Images or PDFs)</h3>
-        <input type="file" id="receiptInput" accept="image/*,application/pdf" multiple>
-        <label for="location">Expense Location:</label>
-        <select id="location">
-            <option value="Taiwan">Taiwan</option>
-            <option value="China">China</option>
-            <option value="United States">United States</option>
-            <option value="Other">Other (Assume USD)</option>
-        </select>
+        <input type="file" id="receiptInput" accept="image/*,application/pdf" multiple onchange="showFileLocations()">
+        <div id="fileLocations"></div>
         <button onclick="processReceipts()">Process Receipts</button>
     </div>
 
@@ -55,10 +50,10 @@
 
         // Timezone mapping
         const timezones = {
-            'Taiwan': 'Asia/Taipei',        // UTC+8
-            'China': 'Asia/Shanghai',       // UTC+8
-            'United States': 'America/Los_Angeles', // UTC-8 or -7 (PST/PDT)
-            'Other': 'America/Los_Angeles'  // Default to US time
+            'Taiwan': 'Asia/Taipei',
+            'China': 'Asia/Shanghai',
+            'United States': 'America/Los_Angeles',
+            'Other': 'America/Los_Angeles'
         };
 
         // Default currency mapping (fallback)
@@ -69,16 +64,39 @@
             'Other': 'USD'
         };
 
+        // Show location dropdowns for each file
+        function showFileLocations() {
+            const files = document.getElementById('receiptInput').files;
+            const container = document.getElementById('fileLocations');
+            container.innerHTML = '';
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                const div = document.createElement('div');
+                div.className = 'file-entry';
+                div.innerHTML = `
+                    <span>${file.name}</span>
+                    <select id="location-${i}">
+                        <option value="Taiwan">Taiwan</option>
+                        <option value="China">China</option>
+                        <option value="United States">United States</option>
+                        <option value="Other">Other (Assume USD)</option>
+                    </select>
+                `;
+                container.appendChild(div);
+            }
+        }
+
         // Process receipt files (images or PDFs)
         async function processReceipts() {
             const files = document.getElementById('receiptInput').files;
-            const location = document.getElementById('location').value;
             if (!files.length) return alert('Please upload receipt files.');
 
             document.getElementById('output').innerText = 'Processing receipts...\n';
             receipts = [];
 
-            for (let file of files) {
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                const location = document.getElementById(`location-${i}`).value;
                 let text;
                 if (file.type === 'application/pdf') {
                     text = await extractTextFromPDF(file);
@@ -93,19 +111,17 @@
             }
         }
 
-        // Extract text from PDF using pdf.js
+        // Extract text from PDF
         async function extractTextFromPDF(file) {
             const arrayBuffer = await file.arrayBuffer();
             const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
             let fullText = '';
-
             for (let i = 1; i <= pdf.numPages; i++) {
                 const page = await pdf.getPage(i);
                 const textContent = await page.getTextContent();
                 const pageText = textContent.items.map(item => item.str).join(' ');
                 fullText += pageText + '\n';
             }
-
             return fullText;
         }
 
@@ -119,24 +135,22 @@
             let amount = rawAmount.replace(/[^0-9.]/g, '');
             let currency;
 
-            // Smart currency detection
             if (rawAmount.includes('$') && !rawAmount.includes('NT$')) {
-                currency = 'USD'; // $ alone means USD
+                currency = 'USD';
             } else if (rawAmount.includes('NT$') || rawAmount.includes('NTD')) {
                 currency = 'NTD';
             } else if (rawAmount.includes('¥') || rawAmount.includes('CNY')) {
                 currency = 'CNY';
             } else {
-                currency = defaultCurrencies[location]; // Fallback to location
+                currency = defaultCurrencies[location];
             }
 
-            // Adjust date to Pacific Time (no label change)
             const localDate = moment.tz(dateMatch[1], 'MM/DD/YYYY', timezones[location]);
             const pacificDate = localDate.clone().tz('America/Los_Angeles').format('MM/DD/YYYY');
 
             return {
-                date: pacificDate,  // Date in Pacific time
-                localDate: dateMatch[1], // Original local date
+                date: pacificDate,
+                localDate: dateMatch[1],
                 amount: amount || 'Unknown',
                 currency: currency,
                 merchant: merchantMatch[1]?.trim() || 'Unknown',
@@ -144,7 +158,7 @@
             };
         }
 
-        // Load and parse CSV file (assumed in Pacific time)
+        // Load and parse CSV file
         function processCSV() {
             const file = document.getElementById('csvInput').files[0];
             if (!file) return alert('Please upload a CSV file.');
@@ -153,10 +167,10 @@
                 header: true,
                 complete: (result) => {
                     transactions = result.data.map(t => ({
-                        date: t.Date || t['Transaction Date'] || t['Posting Date'],
-                        amount: t.Amount?.replace('$', '') || t['Debit'],
-                        merchant: t.Merchant || t.Description
-                    })).filter(t => t.date && t.amount);
+                        date: t['Post Date'] || t['Purchase Date'] || '',
+                        amount: t['Item Total']?.replace('$', '') || '0',
+                        merchant: t['Vendor Name'] || 'Unknown'
+                    }));
                     document.getElementById('output').innerText += 
                         `Loaded ${transactions.length} transactions.\n`;
                 }
@@ -177,7 +191,7 @@
                 return (parseFloat(amount) * rate).toFixed(2);
             } catch (error) {
                 console.error('Rate fetch failed:', error);
-                return amount; // Fallback
+                return amount;
             }
         }
 
@@ -187,10 +201,8 @@
                 return alert('Please process receipts and load transactions first.');
             }
 
-            // CSV header without "(California Time)"
             let csvContent = 'Date,Local Date,Amount (USD),Merchant,Original Currency,Location,Match Status\n';
 
-            // Process each receipt
             for (let receipt of receipts) {
                 const match = transactions.find(t => 
                     t.date === receipt.date && parseFloat(t.amount) === parseFloat(receipt.amount)
@@ -209,7 +221,6 @@
                 csvContent += row + '\n';
             }
 
-            // Download the file
             const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
             const link = document.createElement('a');
             link.href = URL.createObjectURL(blob);
