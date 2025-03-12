@@ -15,13 +15,14 @@
     <script src="https://unpkg.com/papaparse@5.3.0/papaparse.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.4/moment.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/moment-timezone/0.5.43/moment-timezone-with-data.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
 </head>
 <body>
     <h1>ReceiptSync</h1>
 
     <div class="section">
-        <h3>Step 1: Upload Receipt Photos</h3>
-        <input type="file" id="receiptInput" accept="image/*" multiple>
+        <h3>Step 1: Upload Receipt Files (Images or PDFs)</h3>
+        <input type="file" id="receiptInput" accept="image/*,application/pdf" multiple>
         <label for="location">Expense Location:</label>
         <select id="location">
             <option value="Taiwan">Taiwan</option>
@@ -68,22 +69,44 @@
             'Other': 'USD'
         };
 
-        // Process receipt images with Tesseract OCR
+        // Process receipt files (images or PDFs)
         async function processReceipts() {
             const files = document.getElementById('receiptInput').files;
             const location = document.getElementById('location').value;
-            if (!files.length) return alert('Please upload receipt photos.');
+            if (!files.length) return alert('Please upload receipt files.');
 
             document.getElementById('output').innerText = 'Processing receipts...\n';
             receipts = [];
 
             for (let file of files) {
-                const { data: { text } } = await Tesseract.recognize(file, 'eng');
+                let text;
+                if (file.type === 'application/pdf') {
+                    text = await extractTextFromPDF(file);
+                } else {
+                    const { data } = await Tesseract.recognize(file, 'eng');
+                    text = data.text;
+                }
                 const receipt = parseReceipt(text, location);
                 receipts.push({ file, ...receipt });
                 document.getElementById('output').innerText += 
                     `Receipt: ${receipt.date}, ${receipt.amount} ${receipt.currency}, ${receipt.merchant}, ${location}\n`;
             }
+        }
+
+        // Extract text from PDF using pdf.js
+        async function extractTextFromPDF(file) {
+            const arrayBuffer = await file.arrayBuffer();
+            const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+            let fullText = '';
+
+            for (let i = 1; i <= pdf.numPages; i++) {
+                const page = await pdf.getPage(i);
+                const textContent = await page.getTextContent();
+                const pageText = textContent.items.map(item => item.str).join(' ');
+                fullText += pageText + '\n';
+            }
+
+            return fullText;
         }
 
         // Parse receipt text with smart currency detection
@@ -96,16 +119,15 @@
             let amount = rawAmount.replace(/[^0-9.]/g, '');
             let currency;
 
-            // Step 1: Check explicit symbols on receipt
+            // Smart currency detection
             if (rawAmount.includes('$') && !rawAmount.includes('NT$')) {
-                currency = 'USD'; // $ alone means USD, even in Taiwan
+                currency = 'USD'; // $ alone means USD
             } else if (rawAmount.includes('NT$') || rawAmount.includes('NTD')) {
                 currency = 'NTD';
             } else if (rawAmount.includes('¥') || rawAmount.includes('CNY')) {
                 currency = 'CNY';
             } else {
-                // Step 2: Fall back to location-based default if no clear symbol
-                currency = defaultCurrencies[location];
+                currency = defaultCurrencies[location]; // Fallback to location
             }
 
             // Adjust date to California time
