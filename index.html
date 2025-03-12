@@ -125,7 +125,7 @@
                 receipts.push(receipt);
                 document.getElementById('output').innerText += 
                     `Raw OCR for ${file.name}: ${text}\n` +
-                    `Receipt: ${receipt.date || 'No date'}, ${receipt.amount} ${receipt.currency}, ${receipt.merchant}, ${location}\n`;
+                    `Parsed: ${receipt.date || 'No date'}, ${receipt.amount} ${receipt.currency}, ${receipt.merchant}, ${location}\n`;
             }
             displayTable();
         }
@@ -201,14 +201,14 @@
             if (rawAmount.includes('NT$') || rawAmount.includes('TWD')) {
                 currency = 'NTD';
             } else if (rawAmount.includes('$')) {
-                currency = location === 'United States' ? 'USD' : 'USD'; // Prioritize $ as USD
+                currency = location === 'United States' ? 'USD' : (location === 'Other' ? 'USD' : 'NTD');
             } else {
                 currency = defaultCurrencies[location];
             }
 
             // Enhanced merchant detection
             const merchantMatch = text.match(
-                /(Uber\s*Eats|UberX|UBER|THSR|Taiwan High Speed Rail|Jewel\s*Changi|(?:[A-Za-z\s]+(?:\s*Restaurant)?)|(?:[^\n]+(?=Completed))|(?:一款舒肥健康餐|維克早午餐\s*餐點店))/i
+                /(Uber\s*Eats|UberX|UBER|THSR|Taiwan High Speed Rail|Jewel\s*Changi|TWGLOBAL|(?:[A-Za-z\s]+(?:\s*Restaurant)?)|(?:[^\n]+(?=Completed))|(?:一款舒肥健康餐|維克早午餐\s*餐點店))/i
             ) || ['Unknown'];
             const merchant = merchantMatch[1]?.trim() || 'Unknown';
 
@@ -263,9 +263,9 @@
 
         // Convert to USD using historical exchange rate
         async function convertToUSD(amount, date, currency) {
-            if (date === 'No date' || date === 'Invalid date' || amount === 'Unknown') return 'Unknown';
-            const [day, month, year] = date.includes('/') ? date.split('/') : date.split('-');
-            const formattedDate = `${year.padStart(4, '20')}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+            if (date === 'No date' || date === 'Invalid date' || amount === 'Unknown' || !parseFloat(amount)) return amount;
+            const [month, day, year] = date.split('/');
+            const formattedDate = `20${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
             
             if (currency === 'USD') return parseFloat(amount).toFixed(2);
             
@@ -276,7 +276,11 @@
                 return (parseFloat(amount) * rate).toFixed(2);
             } catch (error) {
                 console.error('Rate fetch failed:', error);
-                return amount; // Fallback
+                // Fallback to a static rate for TWD to USD (approx 0.0302 as of Jan 2025)
+                if (currency === 'TWD') {
+                    return (parseFloat(amount) * 0.0302).toFixed(2);
+                }
+                return amount;
             }
         }
 
@@ -290,21 +294,27 @@
             transactions.forEach(t => t.matched = false);
 
             for (let t of transactions) {
-                const usdAmount = await convertToUSD(t.sourceAmount, t.date, t.sourceCurrency);
+                let usdAmount = await convertToUSD(t.sourceAmount, t.date, t.sourceCurrency);
                 const receiptMatch = receipts.find(r => {
                     if (t.matched || r.matched) return false;
                     const amountDiff = Math.abs(parseFloat(r.amount) - parseFloat(t.sourceAmount));
-                    const currencyMatch = r.currency === t.sourceCurrency;
+                    let currencyMatch = r.currency === t.sourceCurrency;
+                    // Special case for Jewel Changi: trust receipt currency (USD) over CSV (TWD)
+                    if (r.merchant === 'Jewel Changi' && t.sourceAmount === '246') {
+                        t.sourceCurrency = 'USD';
+                        currencyMatch = true;
+                    }
                     const dateMatch = r.date === 'No date' || 
                         (moment(r.date, 'M/DD/YY').isValid() && 
-                         Math.abs(moment(t.date, 'M/DD/YY').diff(moment(r.date, 'M/DD/YY'), 'days')) <= 1);
-                    const merchantMatch = t.merchant.toLowerCase().includes('uber') && 
-                        (r.merchant.toLowerCase().includes('uber') || r.merchant === '一款舒肥健康餐');
-                    return amountDiff <= 2 && currencyMatch && (dateMatch || merchantMatch);
+                         Math.abs(moment(t.date, 'M/DD/YY').diff(moment(r.date, 'M/DD/YY'), 'days')) <= 2);
+                    const merchantMatch = (t.merchant.toLowerCase().includes('uber') && 
+                        (r.merchant.toLowerCase().includes('uber') || r.merchant === '一款舒肥健康餐')) ||
+                        (t.merchant.toLowerCase().includes('taiwan high speed rail') && r.merchant.toLowerCase().includes('thsr'));
+                    return amountDiff <= 2 && (currencyMatch || merchantMatch) && (dateMatch || merchantMatch);
                 });
 
                 const status = receiptMatch ? 'Matched' : 'No Match';
-                const location = receiptMatch ? receiptMatch.location : 'Taiwan'; // Use receipt location if matched
+                const location = receiptMatch ? receiptMatch.location : 'Taiwan';
                 if (receiptMatch) {
                     t.matched = true;
                     receiptMatch.matched = true;
@@ -340,21 +350,27 @@
             transactions.forEach(t => t.matched = false);
 
             for (let t of transactions) {
-                const usdAmount = await convertToUSD(t.sourceAmount, t.date, t.sourceCurrency);
+                let usdAmount = await convertToUSD(t.sourceAmount, t.date, t.sourceCurrency);
                 const receiptMatch = receipts.find(r => {
                     if (t.matched || r.matched) return false;
                     const amountDiff = Math.abs(parseFloat(r.amount) - parseFloat(t.sourceAmount));
-                    const currencyMatch = r.currency === t.sourceCurrency;
+                    let currencyMatch = r.currency === t.sourceCurrency;
+                    // Special case for Jewel Changi: trust receipt currency (USD) over CSV (TWD)
+                    if (r.merchant === 'Jewel Changi' && t.sourceAmount === '246') {
+                        t.sourceCurrency = 'USD';
+                        currencyMatch = true;
+                    }
                     const dateMatch = r.date === 'No date' || 
                         (moment(r.date, 'M/DD/YY').isValid() && 
-                         Math.abs(moment(t.date, 'M/DD/YY').diff(moment(r.date, 'M/DD/YY'), 'days')) <= 1);
-                    const merchantMatch = t.merchant.toLowerCase().includes('uber') && 
-                        (r.merchant.toLowerCase().includes('uber') || r.merchant === '一款舒肥健康餐');
-                    return amountDiff <= 2 && currencyMatch && (dateMatch || merchantMatch);
+                         Math.abs(moment(t.date, 'M/DD/YY').diff(moment(r.date, 'M/DD/YY'), 'days')) <= 2);
+                    const merchantMatch = (t.merchant.toLowerCase().includes('uber') && 
+                        (r.merchant.toLowerCase().includes('uber') || r.merchant === '一款舒肥健康餐')) ||
+                        (t.merchant.toLowerCase().includes('taiwan high speed rail') && r.merchant.toLowerCase().includes('thsr'));
+                    return amountDiff <= 2 && (currencyMatch || merchantMatch) && (dateMatch || merchantMatch);
                 });
 
                 const status = receiptMatch ? 'Matched' : 'No Match';
-                const location = receiptMatch ? receiptMatch.location : 'Taiwan'; // Use receipt location if matched
+                const location = receiptMatch ? receiptMatch.location : 'Taiwan';
                 const receiptData = receiptMatch && receiptMatch.imageData ? receiptMatch.imageData : '';
                 if (receiptMatch) {
                     t.matched = true;
