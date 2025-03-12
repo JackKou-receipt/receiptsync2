@@ -20,7 +20,7 @@
             text-align: left;
         }
         th { background-color: #f2f2f2; }
-        .no-receipt { background-color: #ffcccc; } /* Red highlight for missing receipts */
+        .no-receipt { background-color: #ffcccc; }
     </style>
     <!-- Free Libraries -->
     <script src="https://unpkg.com/papaparse@5.3.0/papaparse.min.js"></script>
@@ -59,7 +59,7 @@
     <script>
         let receipts = [];
         let transactions = [];
-        const GOOGLE_VISION_API_KEY = 'YOUR_NEW_API_KEY'; // Replace with your new API key
+        const GOOGLE_VISION_API_KEY = 'AIzaSyDczppCYNM_GUxAkk2NRA2SOrAyEf3witM'; // Replace with your new API key
 
         // Timezone mapping
         const timezones = {
@@ -102,7 +102,12 @@
         // Process receipt files (images or PDFs)
         async function processReceipts() {
             const files = document.getElementById('receiptInput').files;
-            if (!files.length) return alert('Please upload receipt files.');
+            if (!files.length) {
+                document.getElementById('output').innerText = 'No receipt files uploaded.\n';
+                receipts = [];
+                displayTable();
+                return;
+            }
 
             document.getElementById('output').innerText = 'Processing receipts...\n';
             receipts = [];
@@ -203,7 +208,7 @@
 
             // Enhanced merchant detection
             const merchantMatch = text.match(
-                /(Uber\s*Eats|UberX|THSR|Jewel\s*Changi|(?:[A-Za-z\s]+(?:\s*Restaurant)?)|(?:[^\n]+(?=Completed))|(?:一款舒肥健康餐|維克早午餐\s*餐點店))/i
+                /(Uber\s*Eats|UberX|UBER|THSR|Taiwan High Speed Rail|Jewel\s*Changi|(?:[A-Za-z\s]+(?:\s*Restaurant)?)|(?:[^\n]+(?=Completed))|(?:一款舒肥健康餐|維克早午餐\s*餐點店))/i
             ) || ['Unknown'];
             const merchant = merchantMatch[1]?.trim() || 'Unknown';
 
@@ -229,7 +234,8 @@
                 currency: currency,
                 merchant: merchant,
                 location: location,
-                imageData: base64Image
+                imageData: base64Image,
+                matched: false
             };
         }
 
@@ -246,7 +252,7 @@
                         sourceAmount: t['Source Amount'] || '0',
                         sourceCurrency: t['Source Currency'] || 'USD',
                         merchant: t['Vendor Name'] || 'Unknown',
-                        matched: false // Track if this transaction has been matched
+                        matched: false
                     }));
                     document.getElementById('output').innerText += 
                         `Loaded ${transactions.length} transactions.\n`;
@@ -275,21 +281,35 @@
         }
 
         // Display table in output
-        function displayTable() {
+        async function displayTable() {
             const output = document.getElementById('output');
             let html = '<table><tr><th>Date</th><th>Local Date</th><th>Amount (USD)</th><th>Merchant</th><th>Original Amount</th><th>Original Currency</th><th>Location</th><th>Match Status</th><th>Receipt</th><th>No Receipt</th></tr>';
-            transactions.forEach(t => {
-                const usdAmount = convertToUSD(t.sourceAmount, t.date, t.sourceCurrency);
-                const receiptMatch = receipts.find(r => !t.matched && !r.matched && 
-                    Math.abs(parseFloat(r.amount) - parseFloat(t.sourceAmount)) < 1 && 
-                    r.currency === t.sourceCurrency && 
-                    (r.date === 'No date' || moment(r.date, 'M/DD/YY').isValid() && 
-                     Math.abs(moment(t.date, 'M/DD/YY').diff(moment(r.date, 'M/DD/YY'), 'days')) <= 1));
+
+            // Reset matched flags
+            receipts.forEach(r => r.matched = false);
+            transactions.forEach(t => t.matched = false);
+
+            for (let t of transactions) {
+                const usdAmount = await convertToUSD(t.sourceAmount, t.date, t.sourceCurrency);
+                const receiptMatch = receipts.find(r => {
+                    if (t.matched || r.matched) return false;
+                    const amountDiff = Math.abs(parseFloat(r.amount) - parseFloat(t.sourceAmount));
+                    const currencyMatch = r.currency === t.sourceCurrency;
+                    const dateMatch = r.date === 'No date' || 
+                        (moment(r.date, 'M/DD/YY').isValid() && 
+                         Math.abs(moment(t.date, 'M/DD/YY').diff(moment(r.date, 'M/DD/YY'), 'days')) <= 1);
+                    const merchantMatch = t.merchant.toLowerCase().includes('uber') && 
+                        (r.merchant.toLowerCase().includes('uber') || r.merchant === '一款舒肥健康餐');
+                    return amountDiff <= 2 && currencyMatch && (dateMatch || merchantMatch);
+                });
+
                 const status = receiptMatch ? 'Matched' : 'No Match';
+                const location = receiptMatch ? receiptMatch.location : 'Taiwan'; // Use receipt location if matched
                 if (receiptMatch) {
                     t.matched = true;
                     receiptMatch.matched = true;
                 }
+
                 html += `<tr>
                     <td>${t.date}</td>
                     <td>${t.date}</td>
@@ -297,36 +317,50 @@
                     <td>${t.merchant}</td>
                     <td>${t.sourceAmount}</td>
                     <td>${t.sourceCurrency}</td>
-                    <td>${'Taiwan'}</td> <!-- Assume Taiwan for now, adjust if needed -->
+                    <td>${location}</td>
                     <td>${status}</td>
-                    <td>${receiptMatch ? `<img src="${receiptMatch.imageData}" width="100">` : ''}</td>
+                    <td>${receiptMatch && receiptMatch.imageData ? `<img src="${receiptMatch.imageData}" width="100">` : ''}</td>
                     <td class="${!receiptMatch ? 'no-receipt' : ''}">${!receiptMatch ? 'No Receipt' : ''}</td>
                 </tr>`;
-            });
+            }
             html += '</table>';
             output.innerHTML = html;
         }
 
         // Generate and download ZIP with CSV and receipts
         async function generateZip() {
-            if (!receipts.length || !transactions.length) {
-                return alert('Please process receipts and load transactions first.');
+            if (!transactions.length) {
+                return alert('Please load transactions first.');
             }
 
             let csvContent = 'Date,Local Date,Amount (USD),Merchant,Original Amount,Original Currency,Location,Match Status,Receipt\n';
-            transactions.forEach(async t => {
+
+            // Reset matched flags
+            receipts.forEach(r => r.matched = false);
+            transactions.forEach(t => t.matched = false);
+
+            for (let t of transactions) {
                 const usdAmount = await convertToUSD(t.sourceAmount, t.date, t.sourceCurrency);
-                const receiptMatch = receipts.find(r => !t.matched && !r.matched && 
-                    Math.abs(parseFloat(r.amount) - parseFloat(t.sourceAmount)) < 1 && 
-                    r.currency === t.sourceCurrency && 
-                    (r.date === 'No date' || moment(r.date, 'M/DD/YY').isValid() && 
-                     Math.abs(moment(t.date, 'M/DD/YY').diff(moment(r.date, 'M/DD/YY'), 'days')) <= 1));
+                const receiptMatch = receipts.find(r => {
+                    if (t.matched || r.matched) return false;
+                    const amountDiff = Math.abs(parseFloat(r.amount) - parseFloat(t.sourceAmount));
+                    const currencyMatch = r.currency === t.sourceCurrency;
+                    const dateMatch = r.date === 'No date' || 
+                        (moment(r.date, 'M/DD/YY').isValid() && 
+                         Math.abs(moment(t.date, 'M/DD/YY').diff(moment(r.date, 'M/DD/YY'), 'days')) <= 1);
+                    const merchantMatch = t.merchant.toLowerCase().includes('uber') && 
+                        (r.merchant.toLowerCase().includes('uber') || r.merchant === '一款舒肥健康餐');
+                    return amountDiff <= 2 && currencyMatch && (dateMatch || merchantMatch);
+                });
+
                 const status = receiptMatch ? 'Matched' : 'No Match';
-                const receiptData = receiptMatch ? receiptMatch.imageData : '';
+                const location = receiptMatch ? receiptMatch.location : 'Taiwan'; // Use receipt location if matched
+                const receiptData = receiptMatch && receiptMatch.imageData ? receiptMatch.imageData : '';
                 if (receiptMatch) {
                     t.matched = true;
                     receiptMatch.matched = true;
                 }
+
                 const row = [
                     `"${t.date}"`,
                     `"${t.date}"`,
@@ -334,12 +368,12 @@
                     `"${t.merchant}"`,
                     `"${t.sourceAmount}"`,
                     `"${t.sourceCurrency}"`,
-                    `"Taiwan"`, // Assume Taiwan for now, adjust if needed
+                    `"${location}"`,
                     `"${status}"`,
                     `${receiptData ? `"${receiptData}"` : ''}`
                 ].join(',');
                 csvContent += row + '\n';
-            });
+            }
 
             // Create ZIP
             const zip = new JSZip();
