@@ -57,7 +57,7 @@
     <script>
         let receipts = [];
         let transactions = [];
-        const GOOGLE_VISION_API_KEY = 'AIzaSyDczppCYNM_GUxAkk2NRA2SOrAyEf3witM'; // Replace with your new API key
+        const GOOGLE_VISION_API_KEY = 'AIzaSyDczppCYNM_GUxAkk2NRA2SOrAyEf3witM';
 
         // Process receipt files (images or PDFs)
         async function processReceipts() {
@@ -80,7 +80,7 @@
                 } else {
                     text = await extractTextFromImage(file);
                 }
-                const receipt = await parseReceipt(text, file);
+                const receipt = await parseReceipt(text, file, i + 1);
                 receipts.push(receipt);
                 document.getElementById('output').innerText += 
                     `Raw OCR for ${file.name}: ${text}\n` +
@@ -145,7 +145,7 @@
         }
 
         // Parse receipt text with smart currency and merchant detection
-        async function parseReceipt(text, file) {
+        async function parseReceipt(text, file, index) {
             // Enhanced date patterns
             const dateMatch = text.match(
                 /(\d{4}[-\/]\d{2}[-\/]\d{2}|\d{2}[-\/]\d{2}[-\/]\d{4}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}(?:st|nd|rd|th)?\s+\d{4}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4})/i
@@ -184,6 +184,10 @@
                 reader.readAsDataURL(file);
             }) : null;
 
+            // Generate a unique filename for the receipt
+            const safeDate = dateMatch[0].replace(/[^a-zA-Z0-9]/g, '_');
+            const filename = `receipt_${index}_${safeDate}.png`;
+
             return {
                 date: pacificDate,
                 localDate: dateMatch[0],
@@ -191,6 +195,7 @@
                 currency: currency,
                 merchant: merchant,
                 imageData: base64Image,
+                filename: filename, // Add filename property
                 matched: false
             };
         }
@@ -227,16 +232,13 @@
             const formattedDate = `20${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
             
             try {
-                // Note: VISA rates typically require an API subscription (e.g., VISA Currency Conversion API).
-                // Using exchangerate-api.com as a proxy for historical rates to approximate VISA rates.
                 const response = await fetch(`https://api.exchangerate-api.com/v4/${formattedDate}/USD`);
                 const data = await response.json();
-                const rate = data.rates[currency]; // e.g., 1 USD = 33.11 TWD
+                const rate = data.rates[currency];
                 if (!rate) throw new Error('Rate not found');
-                return (parseFloat(amount) / rate).toFixed(2); // Convert to USD: amount / (TWD per USD)
+                return (parseFloat(amount) / rate).toFixed(2);
             } catch (error) {
                 console.error('Rate fetch failed:', error);
-                // Fallback to a static rate for TWD to USD (approx 0.0302 as of Jan 2025, similar to VISA rates)
                 if (currency === 'TWD') {
                     return (parseFloat(amount) * 0.0302).toFixed(2);
                 }
@@ -259,7 +261,6 @@
                     if (t.matched || r.matched) return false;
                     const amountDiff = Math.abs(parseFloat(r.amount) - parseFloat(t.sourceAmount));
                     let currencyMatch = r.currency === t.sourceCurrency;
-                    // Special case for Jewel Changi: trust receipt currency (USD) over CSV (TWD)
                     if (r.merchant.toLowerCase().includes('jewel changi') && t.sourceAmount === '246') {
                         t.sourceCurrency = 'USD';
                         currencyMatch = true;
@@ -270,114 +271,4 @@
                          Math.abs(moment(t.date, 'M/DD/YY').diff(moment(r.date, 'M/DD/YY'), 'days')) <= 3);
                     const merchantMatch = (t.merchant.toLowerCase().includes('uber') && 
                         (r.merchant.toLowerCase().includes('uber') || r.merchant === '一款舒肥健康餐' || r.merchant === '維克早午餐 餐點店')) ||
-                        (t.merchant.toLowerCase().includes('taiwan high speed rail') && r.merchant.toLowerCase().includes('thsr')) ||
-                        (t.merchant.toLowerCase().includes('twglobal') && r.merchant.toLowerCase().includes('jewel changi'));
-                    return amountDiff <= 5 && (currencyMatch || merchantMatch) && (dateMatch || merchantMatch);
-                });
-
-                const status = receiptMatch ? 'Matched' : 'No Match';
-                const location = t.location; // Use CSV location
-                if (receiptMatch) {
-                    t.matched = true;
-                    receiptMatch.matched = true;
-                    // Override currency with receipt data if matched
-                    t.sourceCurrency = receiptMatch.currency;
-                    usdAmount = await convertToUSD(receiptMatch.amount, t.date, receiptMatch.currency);
-                }
-
-                html += `<tr>
-                    <td>${t.date}</td>
-                    <td>${t.date}</td>
-                    <td>${usdAmount}</td>
-                    <td>${t.merchant}</td>
-                    <td>${t.sourceAmount}</td>
-                    <td>${t.sourceCurrency}</td>
-                    <td>${location}</td>
-                    <td>${status}</td>
-                    <td>${receiptMatch && receiptMatch.imageData ? `<img src="${receiptMatch.imageData}" width="100">` : ''}</td>
-                    <td class="${!receiptMatch ? 'no-receipt' : ''}">${!receiptMatch ? 'No Receipt' : ''}</td>
-                </tr>`;
-            }
-            html += '</table>';
-            output.innerHTML = html;
-        }
-
-        // Generate and download ZIP with CSV and receipts
-        async function generateZip() {
-            if (!transactions.length) {
-                return alert('Please load transactions first.');
-            }
-
-            let csvContent = 'Date,Local Date,Amount (USD),Merchant,Original Amount,Original Currency,Location,Match Status,Receipt\n';
-
-            // Reset matched flags
-            receipts.forEach(r => r.matched = false);
-            transactions.forEach(t => t.matched = false);
-
-            for (let t of transactions) {
-                let usdAmount = await convertToUSD(t.sourceAmount, t.date, t.sourceCurrency);
-                const receiptMatch = receipts.find(r => {
-                    if (t.matched || r.matched) return false;
-                    const amountDiff = Math.abs(parseFloat(r.amount) - parseFloat(t.sourceAmount));
-                    let currencyMatch = r.currency === t.sourceCurrency;
-                    // Special case for Jewel Changi: trust receipt currency (USD) over CSV (TWD)
-                    if (r.merchant.toLowerCase().includes('jewel changi') && t.sourceAmount === '246') {
-                        t.sourceCurrency = 'USD';
-                        currencyMatch = true;
-                    }
-                    const dateMatch = r.date === 'No date' || 
-                        (moment(r.date, 'M/DD/YY').isValid() && 
-                         moment(t.date, 'M/DD/YY').isValid() && 
-                         Math.abs(moment(t.date, 'M/DD/YY').diff(moment(r.date, 'M/DD/YY'), 'days')) <= 3);
-                    const merchantMatch = (t.merchant.toLowerCase().includes('uber') && 
-                        (r.merchant.toLowerCase().includes('uber') || r.merchant === '一款舒肥健康餐' || r.merchant === '維克早午餐 餐點店')) ||
-                        (t.merchant.toLowerCase().includes('taiwan high speed rail') && r.merchant.toLowerCase().includes('thsr')) ||
-                        (t.merchant.toLowerCase().includes('twglobal') && r.merchant.toLowerCase().includes('jewel changi'));
-                    return amountDiff <= 5 && (currencyMatch || merchantMatch) && (dateMatch || merchantMatch);
-                });
-
-                const status = receiptMatch ? 'Matched' : 'No Match';
-                const location = t.location; // Use CSV location
-                const receiptData = receiptMatch && receiptMatch.imageData ? receiptMatch.imageData : '';
-                if (receiptMatch) {
-                    t.matched = true;
-                    receiptMatch.matched = true;
-                    // Override currency with receipt data if matched
-                    t.sourceCurrency = receiptMatch.currency;
-                    usdAmount = await convertToUSD(receiptMatch.amount, t.date, receiptMatch.currency);
-                }
-
-                const row = [
-                    `"${t.date}"`,
-                    `"${t.date}"`,
-                    `"${usdAmount}"`,
-                    `"${t.merchant}"`,
-                    `"${t.sourceAmount}"`,
-                    `"${t.sourceCurrency}"`,
-                    `"${location}"`,
-                    `"${status}"`,
-                    `${receiptData ? `"${receiptData}"` : ''}`
-                ].join(',');
-                csvContent += row + '\n';
-            }
-
-            // Create ZIP
-            const zip = new JSZip();
-            const csvBlob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-            zip.file('expense_report.csv', csvBlob);
-
-            // Add receipts to ZIP
-            receipts.forEach((receipt, index) => {
-                if (receipt.imageData) {
-                    const fileName = `receipt_${index + 1}_${receipt.localDate.replace(/[^a-zA-Z0-9]/g, '_')}.png`;
-                    zip.file(fileName, receipt.imageData.split(',')[1], { base64: true });
-                }
-            });
-
-            // Generate and download ZIP
-            const zipBlob = await zip.generateAsync({ type: 'blob' });
-            saveAs(zipBlob, 'receipts_report.zip');
-        }
-    </script>
-</body>
-</html>
+                        (t.merchant.toLowerCase().includes('ta
