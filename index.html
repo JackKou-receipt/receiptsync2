@@ -63,7 +63,6 @@
         async function processReceipts() {
             const files = document.getElementById('receiptInput').files;
             if (!files.length) {
-                console.log('No receipt files uploaded.');
                 document.getElementById('output').innerText = 'No receipt files uploaded.\n';
                 receipts = [];
                 displayTable();
@@ -76,22 +75,16 @@
             for (let i = 0; i < files.length; i++) {
                 const file = files[i];
                 let text;
-                try {
-                    if (file.type === 'application/pdf') {
-                        text = await extractTextFromPDF(file);
-                    } else {
-                        text = await extractTextFromImage(file);
-                    }
-                    const receipt = await parseReceipt(text, file, i + 1);
-                    receipts.push(receipt);
-                    console.log(`Receipt ${i + 1}:`, receipt);
-                    document.getElementById('output').innerText += 
-                        `Raw OCR for ${file.name}: ${text.substring(0, 100)}...\n` +
-                        `Parsed: ${receipt.date || 'No date'}, ${receipt.amount} ${receipt.currency}, ${receipt.merchant}\n`;
-                } catch (error) {
-                    console.error(`Error processing ${file.name}:`, error);
-                    document.getElementById('output').innerText += `Error processing ${file.name}: ${error.message}\n`;
+                if (file.type === 'application/pdf') {
+                    text = await extractTextFromPDF(file);
+                } else {
+                    text = await extractTextFromImage(file);
                 }
+                const receipt = await parseReceipt(text, file);
+                receipts.push(receipt);
+                document.getElementById('output').innerText += 
+                    `Raw OCR for ${file.name}: ${text}\n` +
+                    `Parsed: ${receipt.date || 'No date'}, ${receipt.amount} ${receipt.currency}, ${receipt.merchant}\n`;
             }
             displayTable();
         }
@@ -104,7 +97,8 @@
             for (let i = 1; i <= pdf.numPages; i++) {
                 const page = await pdf.getPage(i);
                 const textContent = await page.getTextContent();
-                fullText += textContent.items.map(item => item.str).join(' ') + '\n';
+                const pageText = textContent.items.map(item => item.str).join(' ');
+                fullText += pageText + '\n';
             }
             return fullText;
         }
@@ -145,29 +139,37 @@
                 }
             } catch (error) {
                 console.error('Google Vision API error:', error);
+                document.getElementById('output').innerText += `Error processing file: ${error.message}\n`;
                 return '';
             }
         }
 
         // Parse receipt text with smart currency and merchant detection
-        async function parseReceipt(text, file, index) {
+        async function parseReceipt(text, file) {
+            // Enhanced date patterns
             const dateMatch = text.match(
                 /(\d{4}[-\/]\d{2}[-\/]\d{2}|\d{2}[-\/]\d{2}[-\/]\d{4}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}(?:st|nd|rd|th)?\s+\d{4}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4})/i
             ) || ['No date'];
 
+            // Enhanced amount and currency detection
             const amountMatch = text.match(/(?:NT\$|TWD|\$)\s*([\d,]+\.?\d*)/i) || ['Unknown', '0'];
             let rawAmount = amountMatch[0] || 'Unknown';
-            let amount = amountMatch[1].replace(/,/g, '') || '0';
+            let amount = amountMatch[1].replace(/,/g, ''); // Remove commas
 
             let currency = 'Unknown';
-            if (rawAmount.includes('NT$') || rawAmount.includes('TWD')) currency = 'TWD';
-            else if (rawAmount.includes('$')) currency = 'USD';
+            if (rawAmount.includes('NT$') || rawAmount.includes('TWD')) {
+                currency = 'TWD';
+            } else if (rawAmount.includes('$')) {
+                currency = 'USD'; // Assume $ is USD unless specified otherwise
+            }
 
+            // Enhanced merchant detection
             const merchantMatch = text.match(
                 /(Uber\s*Eats|UberX|UBER|THSR|Taiwan High Speed Rail|Jewel\s*Changi|TWGLOBAL|(?:[A-Za-z\s]+(?:\s*Restaurant)?)|(?:[^\n]+(?=Completed))|(?:一款舒肥健康餐|維克早午餐\s*餐點店))/i
             ) || ['Unknown'];
             const merchant = merchantMatch[1]?.trim() || 'Unknown';
 
+            // Parse and convert date
             let localDate = moment(dateMatch[0], [
                 'YYYY/MM/DD', 'MM/DD/YYYY', 'MMM DD YYYY', 'DD-MMM-YYYY', 'YYYY-MMM-DD'
             ], true);
@@ -175,85 +177,89 @@
                 ? localDate.clone().tz('America/Los_Angeles').format('M/DD/YY')
                 : 'No date';
 
+            // Convert file to base64 for attachment
             const base64Image = file ? await new Promise((resolve) => {
                 const reader = new FileReader();
                 reader.onload = () => resolve(reader.result);
                 reader.readAsDataURL(file);
             }) : null;
 
-            const safeDate = dateMatch[0].replace(/[^a-zA-Z0-9]/g, '_');
-            const filename = `receipt_${index}_${safeDate}.png`;
-
             return {
-                index, filename, date: pacificDate, localDate: dateMatch[0], amount, currency, merchant, imageData: base64Image, matched: false
+                date: pacificDate,
+                localDate: dateMatch[0],
+                amount: amount || 'Unknown',
+                currency: currency,
+                merchant: merchant,
+                imageData: base64Image,
+                matched: false
             };
         }
 
         // Load and parse CSV file
         function processCSV() {
             const file = document.getElementById('csvInput').files[0];
-            if (!file) {
-                console.log('No CSV file uploaded.');
-                return alert('Please upload a CSV file.');
-            }
+            if (!file) return alert('Please upload a CSV file.');
 
             Papa.parse(file, {
                 header: true,
                 complete: (result) => {
-                    console.log('Raw CSV data:', result.data);
                     transactions = result.data.map(t => ({
-                        date: t['Date'] || t['Local Date'] || 'Unknown',
+                        date: t['Date'] || t['Local Date'] || '',
                         sourceAmount: t['Original Amount'] || '0',
                         sourceCurrency: t['Original Currency'] || 'USD',
                         merchant: t['Merchant'] || 'Unknown',
                         location: t['Location'] || 'Unknown',
-                        matched: false,
-                        matchedReceipt: null
-                    })).filter(t => t.date !== 'Unknown' || t.sourceAmount !== '0'); // Filter out invalid rows
-                    console.log('Processed transactions:', transactions);
-                    document.getElementById('output').innerText += `Loaded ${transactions.length} transactions.\n`;
+                        matched: false
+                    }));
+                    document.getElementById('output').innerText += 
+                        `Loaded ${transactions.length} transactions.\n`;
                     displayTable();
-                },
-                error: (error) => {
-                    console.error('CSV parsing error:', error);
-                    document.getElementById('output').innerText += `Error parsing CSV: ${error.message}\n`;
                 }
             });
         }
 
         // Convert to USD using VISA exchange rates (approximated)
         async function convertToUSD(amount, date, currency) {
-            if (date === 'No date' || date === 'Invalid date' || !parseFloat(amount)) return '0.00';
+            if (date === 'No date' || date === 'Invalid date' || amount === 'Unknown' || !parseFloat(amount)) return amount;
             if (currency === 'USD') return parseFloat(amount).toFixed(2);
 
+            const [month, day, year] = date.split('/');
+            const formattedDate = `20${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+            
             try {
-                const [month, day, year] = date.split('/');
-                const formattedDate = `20${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+                // Note: VISA rates typically require an API subscription (e.g., VISA Currency Conversion API).
+                // Using exchangerate-api.com as a proxy for historical rates to approximate VISA rates.
                 const response = await fetch(`https://api.exchangerate-api.com/v4/${formattedDate}/USD`);
                 const data = await response.json();
-                const rate = data.rates[currency];
+                const rate = data.rates[currency]; // e.g., 1 USD = 33.11 TWD
                 if (!rate) throw new Error('Rate not found');
-                return (parseFloat(amount) / rate).toFixed(2);
+                return (parseFloat(amount) / rate).toFixed(2); // Convert to USD: amount / (TWD per USD)
             } catch (error) {
                 console.error('Rate fetch failed:', error);
-                if (currency === 'TWD') return (parseFloat(amount) * 0.0302).toFixed(2);
+                // Fallback to a static rate for TWD to USD (approx 0.0302 as of Jan 2025, similar to VISA rates)
+                if (currency === 'TWD') {
+                    return (parseFloat(amount) * 0.0302).toFixed(2);
+                }
                 return amount;
             }
         }
 
-        // Match transactions to receipts
-        function matchTransactionsToReceipts() {
+        // Display table in output
+        async function displayTable() {
+            const output = document.getElementById('output');
+            let html = '<table><tr><th>Date</th><th>Local Date</th><th>Amount (USD)</th><th>Merchant</th><th>Original Amount</th><th>Original Currency</th><th>Location</th><th>Match Status</th><th>Receipt</th><th>No Receipt</th></tr>';
+
+            // Reset matched flags
             receipts.forEach(r => r.matched = false);
-            transactions.forEach(t => {
-                t.matched = false;
-                t.matchedReceipt = null;
-            });
+            transactions.forEach(t => t.matched = false);
 
             for (let t of transactions) {
+                let usdAmount = await convertToUSD(t.sourceAmount, t.date, t.sourceCurrency);
                 const receiptMatch = receipts.find(r => {
                     if (t.matched || r.matched) return false;
                     const amountDiff = Math.abs(parseFloat(r.amount) - parseFloat(t.sourceAmount));
                     let currencyMatch = r.currency === t.sourceCurrency;
+                    // Special case for Jewel Changi: trust receipt currency (USD) over CSV (TWD)
                     if (r.merchant.toLowerCase().includes('jewel changi') && t.sourceAmount === '246') {
                         t.sourceCurrency = 'USD';
                         currencyMatch = true;
@@ -269,32 +275,15 @@
                     return amountDiff <= 5 && (currencyMatch || merchantMatch) && (dateMatch || merchantMatch);
                 });
 
+                const status = receiptMatch ? 'Matched' : 'No Match';
+                const location = t.location; // Use CSV location
                 if (receiptMatch) {
                     t.matched = true;
-                    t.matchedReceipt = receiptMatch;
                     receiptMatch.matched = true;
+                    // Override currency with receipt data if matched
                     t.sourceCurrency = receiptMatch.currency;
+                    usdAmount = await convertToUSD(receiptMatch.amount, t.date, receiptMatch.currency);
                 }
-            }
-            console.log('Matched transactions:', transactions);
-        }
-
-        // Display table in output
-        async function displayTable() {
-            matchTransactionsToReceipts();
-
-            const output = document.getElementById('output');
-            let html = '<table><tr><th>Date</th><th>Local Date</th><th>Amount (USD)</th><th>Merchant</th><th>Original Amount</th><th>Original Currency</th><th>Location</th><th>Match Status</th><th>Receipt</th><th>No Receipt</th></tr>';
-
-            for (let t of transactions) {
-                let usdAmount = await convertToUSD(
-                    t.matchedReceipt ? t.matchedReceipt.amount : t.sourceAmount,
-                    t.date,
-                    t.matchedReceipt ? t.matchedReceipt.currency : t.sourceCurrency
-                );
-
-                const status = t.matched ? 'Matched' : 'No Match';
-                const location = t.location;
 
                 html += `<tr>
                     <td>${t.date}</td>
@@ -305,8 +294,8 @@
                     <td>${t.sourceCurrency}</td>
                     <td>${location}</td>
                     <td>${status}</td>
-                    <td>${t.matchedReceipt && t.matchedReceipt.imageData ? `<img src="${t.matchedReceipt.imageData}" width="100">` : ''}</td>
-                    <td class="${!t.matched ? 'no-receipt' : ''}">${!t.matched ? 'No Receipt' : ''}</td>
+                    <td>${receiptMatch && receiptMatch.imageData ? `<img src="${receiptMatch.imageData}" width="100">` : ''}</td>
+                    <td class="${!receiptMatch ? 'no-receipt' : ''}">${!receiptMatch ? 'No Receipt' : ''}</td>
                 </tr>`;
             }
             html += '</table>';
@@ -316,24 +305,47 @@
         // Generate and download ZIP with CSV and receipts
         async function generateZip() {
             if (!transactions.length) {
-                console.log('No transactions to process.');
                 return alert('Please load transactions first.');
             }
 
-            matchTransactionsToReceipts();
-
             let csvContent = 'Date,Local Date,Amount (USD),Merchant,Original Amount,Original Currency,Location,Match Status,Receipt\n';
 
-            for (let t of transactions) {
-                let usdAmount = await convertToUSD(
-                    t.matchedReceipt ? t.matchedReceipt.amount : t.sourceAmount,
-                    t.date,
-                    t.matchedReceipt ? t.matchedReceipt.currency : t.sourceCurrency
-                );
+            // Reset matched flags
+            receipts.forEach(r => r.matched = false);
+            transactions.forEach(t => t.matched = false);
 
-                const status = t.matched ? 'Matched' : 'No Match';
-                const location = t.location;
-                const receiptFilename = t.matchedReceipt ? t.matchedReceipt.filename : '';
+            for (let t of transactions) {
+                let usdAmount = await convertToUSD(t.sourceAmount, t.date, t.sourceCurrency);
+                const receiptMatch = receipts.find(r => {
+                    if (t.matched || r.matched) return false;
+                    const amountDiff = Math.abs(parseFloat(r.amount) - parseFloat(t.sourceAmount));
+                    let currencyMatch = r.currency === t.sourceCurrency;
+                    // Special case for Jewel Changi: trust receipt currency (USD) over CSV (TWD)
+                    if (r.merchant.toLowerCase().includes('jewel changi') && t.sourceAmount === '246') {
+                        t.sourceCurrency = 'USD';
+                        currencyMatch = true;
+                    }
+                    const dateMatch = r.date === 'No date' || 
+                        (moment(r.date, 'M/DD/YY').isValid() && 
+                         moment(t.date, 'M/DD/YY').isValid() && 
+                         Math.abs(moment(t.date, 'M/DD/YY').diff(moment(r.date, 'M/DD/YY'), 'days')) <= 3);
+                    const merchantMatch = (t.merchant.toLowerCase().includes('uber') && 
+                        (r.merchant.toLowerCase().includes('uber') || r.merchant === '一款舒肥健康餐' || r.merchant === '維克早午餐 餐點店')) ||
+                        (t.merchant.toLowerCase().includes('taiwan high speed rail') && r.merchant.toLowerCase().includes('thsr')) ||
+                        (t.merchant.toLowerCase().includes('twglobal') && r.merchant.toLowerCase().includes('jewel changi'));
+                    return amountDiff <= 5 && (currencyMatch || merchantMatch) && (dateMatch || merchantMatch);
+                });
+
+                const status = receiptMatch ? 'Matched' : 'No Match';
+                const location = t.location; // Use CSV location
+                const receiptData = receiptMatch && receiptMatch.imageData ? receiptMatch.imageData : '';
+                if (receiptMatch) {
+                    t.matched = true;
+                    receiptMatch.matched = true;
+                    // Override currency with receipt data if matched
+                    t.sourceCurrency = receiptMatch.currency;
+                    usdAmount = await convertToUSD(receiptMatch.amount, t.date, receiptMatch.currency);
+                }
 
                 const row = [
                     `"${t.date}"`,
@@ -344,49 +356,28 @@
                     `"${t.sourceCurrency}"`,
                     `"${location}"`,
                     `"${status}"`,
-                    `"${receiptFilename}"`
+                    `${receiptData ? `"${receiptData}"` : ''}`
                 ].join(',');
                 csvContent += row + '\n';
             }
 
+            // Create ZIP
             const zip = new JSZip();
             const csvBlob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
             zip.file('expense_report.csv', csvBlob);
 
-            receipts.forEach(receipt => {
+            // Add receipts to ZIP
+            receipts.forEach((receipt, index) => {
                 if (receipt.imageData) {
-                    zip.file(receipt.filename, receipt.imageData.split(',')[1], { base64: true });
+                    const fileName = `receipt_${index + 1}_${receipt.localDate.replace(/[^a-zA-Z0-9]/g, '_')}.png`;
+                    zip.file(fileName, receipt.imageData.split(',')[1], { base64: true });
                 }
             });
 
+            // Generate and download ZIP
             const zipBlob = await zip.generateAsync({ type: 'blob' });
             saveAs(zipBlob, 'receipts_report.zip');
         }
-
-        // Fallback to hardcoded transactions for testing
-        function loadHardcodedTransactions() {
-            transactions = [
-                { date: "1/11/25", sourceAmount: "884", sourceCurrency: "USD", merchant: "EVA AIR     6957167490173", location: "Taiwan", matched: false, matchedReceipt: null },
-                { date: "1/13/25", sourceAmount: "1330", sourceCurrency: "TWD", merchant: "Taiwan High Speed Rail Co", location: "Taiwan", matched: false, matchedReceipt: null },
-                { date: "1/23/25", sourceAmount: "14553", sourceCurrency: "TWD", merchant: "MARRIOTT HOTEL KAOHSIU", location: "Taiwan", matched: false, matchedReceipt: null },
-                { date: "1/24/25", sourceAmount: "4.43", sourceCurrency: "USD", merchant: "INTERNATIONAL TRANSACTION", location: "Taiwan", matched: false, matchedReceipt: null },
-                { date: "1/24/25", sourceAmount: "0.09", sourceCurrency: "USD", merchant: "INTERNATIONAL TRANSACTION", location: "Taiwan", matched: false, matchedReceipt: null },
-                { date: "1/24/25", sourceAmount: "0.08", sourceCurrency: "USD", merchant: "INTERNATIONAL TRANSACTION", location: "Taiwan", matched: false, matchedReceipt: null },
-                { date: "1/24/25", sourceAmount: "150", sourceCurrency: "USD", merchant: "SQ  SUNSHINE LIMOUSINE", location: "Taiwan", matched: false, matchedReceipt: null }
-            ];
-            console.log('Loaded hardcoded transactions:', transactions);
-            document.getElementById('output').innerText += `Loaded ${transactions.length} hardcoded transactions.\n`;
-            displayTable();
-        }
-
-        // Add button to load hardcoded data
-        document.addEventListener('DOMContentLoaded', () => {
-            const section = document.querySelector('.section:nth-child(3)');
-            const button = document.createElement('button');
-            button.textContent = 'Load Hardcoded Transactions';
-            button.onclick = loadHardcodedTransactions;
-            section.appendChild(button);
-        });
     </script>
 </body>
 </html>
