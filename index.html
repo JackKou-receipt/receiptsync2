@@ -34,7 +34,7 @@
     </div>
 
     <div class="section">
-        <h3>Step 2: Upload Credit Card CSV (California Time)</h3>
+        <h3>Step 2: Upload Credit Card CSV</h3>
         <input type="file" id="csvInput" accept=".csv">
         <button onclick="processCSV()">Load Transactions</button>
     </div>
@@ -130,12 +130,12 @@
                 currency = defaultCurrencies[location]; // Fallback to location
             }
 
-            // Adjust date to California time
+            // Adjust date to Pacific Time (no label change)
             const localDate = moment.tz(dateMatch[1], 'MM/DD/YYYY', timezones[location]);
-            const californiaDate = localDate.clone().tz('America/Los_Angeles').format('MM/DD/YYYY');
+            const pacificDate = localDate.clone().tz('America/Los_Angeles').format('MM/DD/YYYY');
 
             return {
-                date: californiaDate,  // Date in California time
+                date: pacificDate,  // Date in Pacific time
                 localDate: dateMatch[1], // Original local date
                 amount: amount || 'Unknown',
                 currency: currency,
@@ -144,7 +144,7 @@
             };
         }
 
-        // Load and parse CSV file (assumed in California time)
+        // Load and parse CSV file (assumed in Pacific time)
         function processCSV() {
             const file = document.getElementById('csvInput').files[0];
             if (!file) return alert('Please upload a CSV file.');
@@ -187,8 +187,8 @@
                 return alert('Please process receipts and load transactions first.');
             }
 
-            // CSV header
-            let csvContent = 'Date (California Time),Local Date,Amount (USD),Merchant,Original Currency,Location,Match Status\n';
+            // CSV header without "(California Time)"
+            let csvContent = 'Date,Local Date,Amount (USD),Merchant,Original Currency,Location,Match Status\n';
 
             // Process each receipt
             for (let receipt of receipts) {
