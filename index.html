@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ReceiptSync</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        .section { margin-bottom: 20px; }
+        button { padding: 10px; }
+        #output { white-space: pre-wrap; }
+    </style>
+    <!-- Free Libraries -->
+    <script src="https://unpkg.com/tesseract.js@4.0.0/dist/tesseract.min.js"></script>
+    <script src="https://unpkg.com/papaparse@5.3.0/papaparse.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+</head>
+<body>
+    <h1>ReceiptSync</h1>
+
+    <div class="section">
+        <h3>Step 1: Upload Receipt Photos</h3>
+        <input type="file" id="receiptInput" accept="image/*" multiple>
+        <button onclick="processReceipts()">Process Receipts</button>
+    </div>
+
+    <div class="section">
+        <h3>Step 2: Upload Credit Card CSV</h3>
+        <input type="file" id="csvInput" accept=".csv">
+        <button onclick="processCSV()">Load Transactions</button>
+    </div>
+
+    <div class="section">
+        <h3>Step 3: Generate Report</h3>
+        <button onclick="generatePDF()">Download PDF</button>
+    </div>
+
+    <div class="section">
+        <h3>Output</h3>
+        <div id="output"></div>
+    </div>
+
+    <script>
+        const { jsPDF } = window.jspdf;
+        let receipts = [];
+        let transactions = [];
+
+        // Process receipt images with Tesseract OCR
+        async function processReceipts() {
+            const files = document.getElementById('receiptInput').files;
+            if (!files.length) return alert('Please upload receipt photos.');
+
+            document.getElementById('output').innerText = 'Processing receipts...\n';
+            receipts = [];
+
+            for (let file of files) {
+                const { data: { text } } = await Tesseract.recognize(file, 'eng');
+                const receipt = parseReceipt(text);
+                receipts.push({ file, ...receipt });
+                document.getElementById('output').innerText += 
+                    `Receipt: ${receipt.date}, ${receipt.amount}, ${receipt.merchant}\n`;
+            }
+        }
+
+        // Parse receipt text into structured data
+        function parseReceipt(text) {
+            const dateMatch = text.match(/(\d{2}[-\/]\d{2}[-\/]\d{4})/) || ['Unknown'];
+            const amountMatch = text.match(/\$[\d.]+/) || ['Unknown'];
+            const merchantMatch = text.match(/(?:Merchant|Store|Paid to):?\s*([^\n]+)/i) || ['Unknown'];
+            return {
+                date: dateMatch[1],
+                amount: amountMatch[0]?.replace('$', '') || 'Unknown',
+                merchant: merchantMatch[1] || 'Unknown'
+            };
+        }
+
+        // Load and parse CSV file
+        function processCSV() {
+            const file = document.getElementById('csvInput').files[0];
+            if (!file) return alert('Please upload a CSV file.');
+
+            Papa.parse(file, {
+                header: true,
+                complete: (result) => {
+                    transactions = result.data.map(t => ({
+                        date: t.Date || t['Transaction Date'],
+                        amount: t.Amount?.replace('$', '') || t['Debit'],
+                        merchant: t.Merchant || t.Description
+                    }));
+                    document.getElementById('output').innerText += 
+                        `Loaded ${transactions.length} transactions.\n`;
+                }
+            });
+        }
+
+        // Generate PDF with summary and images
+        async function generatePDF() {
+            if (!receipts.length || !transactions.length) {
+                return alert('Please process receipts and load transactions first.');
+            }
+
+            const doc = new jsPDF();
+            let y = 10;
+
+            doc.text('Expense Report', 10, y);
+            y += 10;
+
+            for (let receipt of receipts) {
+                const match = transactions.find(t => 
+                    t.date === receipt.date && parseFloat(t.amount) === parseFloat(receipt.amount)
+                );
+                const summary = match 
+                    ? `${receipt.date} | $${receipt.amount} USD | ${receipt.merchant} (Matched)`
+                    : `${receipt.date} | $${receipt.amount} USD | ${receipt.merchant} (No Match)`;
+                
+                doc.text(summary, 10, y);
+                y += 10;
+
+                // Add receipt image
+                const imgData = await getImageData(receipt.file);
+                doc.addImage(imgData, 'JPEG', 10, y, 50, 50);
+                y += 60;
+            }
+
+            doc.save('expense_report.pdf');
+        }
+
+        // Convert image file to base64 for PDF
+        function getImageData(file) {
+            return new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.readAsDataURL(file);
+            });
+        }
+    </script>
+</body>
+</html>
