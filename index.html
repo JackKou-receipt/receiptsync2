@@ -365,10 +365,14 @@
             const csvBlob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
             zip.file('expense_report.csv', csvBlob);
 
-            // Add receipts to ZIP
-            receipts.forEach(receipt => {
+            // Add receipts to ZIP with debugging
+            console.log('Adding receipts to ZIP:', receipts.length, 'receipts');
+            receipts.forEach((receipt, index) => {
                 if (receipt.imageData) {
+                    console.log(`Adding ${receipt.filename}, imageData length: ${receipt.imageData.length}`);
                     zip.file(receipt.filename, receipt.imageData.split(',')[1], { base64: true });
+                } else {
+                    console.warn(`No imageData for ${receipt.filename} at index ${index}`);
                 }
             });
 
