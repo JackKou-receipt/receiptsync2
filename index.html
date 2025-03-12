@@ -13,6 +13,8 @@
     <!-- Free Libraries -->
     <script src="https://unpkg.com/tesseract.js@4.0.0/dist/tesseract.min.js"></script>
     <script src="https://unpkg.com/papaparse@5.3.0/papaparse.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.4/moment.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/moment-timezone/0.5.43/moment-timezone-with-data.min.js"></script>
 </head>
 <body>
     <h1>ReceiptSync</h1>
@@ -20,11 +22,18 @@
     <div class="section">
         <h3>Step 1: Upload Receipt Photos</h3>
         <input type="file" id="receiptInput" accept="image/*" multiple>
+        <label for="location">Expense Location:</label>
+        <select id="location">
+            <option value="Taiwan">Taiwan</option>
+            <option value="China">China</option>
+            <option value="United States">United States</option>
+            <option value="Other">Other (Assume USD)</option>
+        </select>
         <button onclick="processReceipts()">Process Receipts</button>
     </div>
 
     <div class="section">
-        <h3>Step 2: Upload Credit Card CSV</h3>
+        <h3>Step 2: Upload Credit Card CSV (California Time)</h3>
         <input type="file" id="csvInput" accept=".csv">
         <button onclick="processCSV()">Load Transactions</button>
     </div>
@@ -43,9 +52,26 @@
         let receipts = [];
         let transactions = [];
 
+        // Timezone mapping
+        const timezones = {
+            'Taiwan': 'Asia/Taipei',        // UTC+8
+            'China': 'Asia/Shanghai',       // UTC+8
+            'United States': 'America/Los_Angeles', // UTC-8 or -7 (PST/PDT)
+            'Other': 'America/Los_Angeles'  // Default to US time
+        };
+
+        // Default currency mapping (fallback)
+        const defaultCurrencies = {
+            'Taiwan': 'NTD',
+            'China': 'CNY',
+            'United States': 'USD',
+            'Other': 'USD'
+        };
+
         // Process receipt images with Tesseract OCR
         async function processReceipts() {
             const files = document.getElementById('receiptInput').files;
+            const location = document.getElementById('location').value;
             if (!files.length) return alert('Please upload receipt photos.');
 
             document.getElementById('output').innerText = 'Processing receipts...\n';
@@ -53,38 +79,50 @@
 
             for (let file of files) {
                 const { data: { text } } = await Tesseract.recognize(file, 'eng');
-                const receipt = parseReceipt(text);
+                const receipt = parseReceipt(text, location);
                 receipts.push({ file, ...receipt });
                 document.getElementById('output').innerText += 
-                    `Receipt: ${receipt.date}, ${receipt.amount} ${receipt.currency}, ${receipt.merchant}\n`;
+                    `Receipt: ${receipt.date}, ${receipt.amount} ${receipt.currency}, ${receipt.merchant}, ${location}\n`;
             }
         }
 
-        // Parse receipt text into structured data with currency detection
-        function parseReceipt(text) {
+        // Parse receipt text with smart currency detection
+        function parseReceipt(text, location) {
             const dateMatch = text.match(/(\d{2}[-\/]\d{2}[-\/]\d{4}|\d{4}[-\/]\d{2}[-\/]\d{2})/) || ['Unknown'];
-            const amountMatch = text.match(/(\$|NT\$|NTD)?\s*[\d.,]+/) || ['Unknown'];
+            const amountMatch = text.match(/(\$|NT\$|NTD|¥|CNY)?\s*[\d.,]+/) || ['Unknown'];
             const merchantMatch = text.match(/(?:Merchant|Store|Paid to|[A-Z][a-z]+):?\s*([^\n]+)/i) || ['Unknown'];
             
             let rawAmount = amountMatch[0] || 'Unknown';
-            let currency = 'NTD'; // Default to NTD if unclear
             let amount = rawAmount.replace(/[^0-9.]/g, '');
-            
+            let currency;
+
+            // Step 1: Check explicit symbols on receipt
             if (rawAmount.includes('$') && !rawAmount.includes('NT$')) {
-                currency = 'USD';
+                currency = 'USD'; // $ alone means USD, even in Taiwan
             } else if (rawAmount.includes('NT$') || rawAmount.includes('NTD')) {
                 currency = 'NTD';
+            } else if (rawAmount.includes('¥') || rawAmount.includes('CNY')) {
+                currency = 'CNY';
+            } else {
+                // Step 2: Fall back to location-based default if no clear symbol
+                currency = defaultCurrencies[location];
             }
 
+            // Adjust date to California time
+            const localDate = moment.tz(dateMatch[1], 'MM/DD/YYYY', timezones[location]);
+            const californiaDate = localDate.clone().tz('America/Los_Angeles').format('MM/DD/YYYY');
+
             return {
-                date: dateMatch[1],
+                date: californiaDate,  // Date in California time
+                localDate: dateMatch[1], // Original local date
                 amount: amount || 'Unknown',
                 currency: currency,
-                merchant: merchantMatch[1]?.trim() || 'Unknown'
+                merchant: merchantMatch[1]?.trim() || 'Unknown',
+                location: location
             };
         }
 
-        // Load and parse CSV file
+        // Load and parse CSV file (assumed in California time)
         function processCSV() {
             const file = document.getElementById('csvInput').files[0];
             if (!file) return alert('Please upload a CSV file.');
@@ -103,13 +141,15 @@
             });
         }
 
-        // Convert NTD to USD using historical exchange rate
-        async function convertToUSD(amount, date) {
+        // Convert to USD using historical exchange rate
+        async function convertToUSD(amount, date, currency) {
             const [day, month, year] = date.includes('/') ? date.split('/') : date.split('-');
             const formattedDate = `${year.padStart(4, '20')}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
             
+            if (currency === 'USD') return parseFloat(amount).toFixed(2);
+            
             try {
-                const response = await fetch(`https://api.exchangerate-api.com/v4/${formattedDate}/NTD`);
+                const response = await fetch(`https://api.exchangerate-api.com/v4/${formattedDate}/${currency}`);
                 const data = await response.json();
                 const rate = data.rates['USD'];
                 return (parseFloat(amount) * rate).toFixed(2);
@@ -126,29 +166,28 @@
             }
 
             // CSV header
-            let csvContent = 'Date,Amount (USD),Merchant,Original Currency,Match Status\n';
+            let csvContent = 'Date (California Time),Local Date,Amount (USD),Merchant,Original Currency,Location,Match Status\n';
 
             // Process each receipt
             for (let receipt of receipts) {
                 const match = transactions.find(t => 
                     t.date === receipt.date && parseFloat(t.amount) === parseFloat(receipt.amount)
                 );
-                let usdAmount = receipt.amount;
-                if (receipt.currency === 'NTD') {
-                    usdAmount = await convertToUSD(receipt.amount, receipt.date);
-                }
+                const usdAmount = await convertToUSD(receipt.amount, receipt.date, receipt.currency);
                 const status = match ? 'Matched' : 'No Match';
                 const row = [
-                    `"${receipt.date}"`,           // Wrap in quotes to handle commas
+                    `"${receipt.date}"`,
+                    `"${receipt.localDate}"`,
                     usdAmount,
-                    `"${receipt.merchant}"`,      // Wrap in quotes
+                    `"${receipt.merchant}"`,
                     receipt.currency,
+                    receipt.location,
                     status
                 ].join(',');
                 csvContent += row + '\n';
             }
 
-            // Create and download the file
+            // Download the file
             const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
             const link = document.createElement('a');
             link.href = URL.createObjectURL(blob);
