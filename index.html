@@ -28,6 +28,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
 <body>
     <h1>ReceiptSync</h1>
@@ -46,7 +47,7 @@
 
     <div class="section">
         <h3>Step 3: Generate Report</h3>
-        <button onclick="generateZip()">Download ZIP (CSV + Receipts)</button>
+        <button onclick="generateZip()">Download ZIP (Excel Report + Receipts)</button>
     </div>
 
     <div class="section">
@@ -144,7 +145,7 @@
             ) || ['No date'];
             const amountMatch = text.match(/(?:NT\$|TWD|\$)\s*([\d,]+\.?\d*)/i) || ['0', '0'];
             const amount = amountMatch[1].replace(/,/g, '') || '0';
-            const currency = text.includes('NT$' ) || text.includes('TWD') ? 'TWD' : 'USD';
+            const currency = text.includes('NT$') || text.includes('TWD') ? 'TWD' : 'USD';
             const merchantMatch = text.match(
                 /(EVA AIR|Taiwan High Speed Rail|MARRIOTT|UBER|TWGLOBAL|Jewel Changi)/i
             ) || ['Unknown'];
@@ -179,7 +180,7 @@
                 complete: (result) => {
                     console.log('Raw CSV data:', result.data);
                     transactions = result.data.map(t => ({
-                        date: t['Purchase Date'] || 'Unknown', // Use Purchase Date as the key date
+                        date: t['Purchase Date'] || 'Unknown',
                         merchant: t['Vendor Name'] || 'Unknown',
                         sourceAmount: t['Source Amount'] || '0',
                         sourceCurrency: t['Source Currency'] || 'USD',
@@ -213,7 +214,7 @@
                 return (parseFloat(amount) / rate).toFixed(2);
             } catch (error) {
                 console.error('Rate fetch failed:', error);
-                if (currency === 'TWD') return (parseFloat(amount) * 0.0302).toFixed(2); // Fallback TWD rate
+                if (currency === 'TWD') return (parseFloat(amount) * 0.0302).toFixed(2);
                 return amount;
             }
         }
@@ -277,7 +278,7 @@
             output.innerHTML = html;
         }
 
-        // Generate and download ZIP with CSV and receipts
+        // Generate and download ZIP with Excel report and receipts
         async function generateZip() {
             if (!transactions.length) {
                 console.log('No transactions to process.');
@@ -286,32 +287,44 @@
 
             matchTransactionsToReceipts();
 
-            let csvContent = 'Date,Merchant,Original Amount,Original Currency,Amount (USD),Location,Match Status,Receipt\n';
-            for (let t of transactions) {
-                const usdAmount = await convertToUSD(
-                    t.matchedReceipt ? t.matchedReceipt.amount : t.sourceAmount,
-                    t.date,
-                    t.matchedReceipt ? t.matchedReceipt.currency : t.sourceCurrency
-                );
-                const status = t.matched ? 'Matched' : 'No Match';
-                const receiptFilename = t.matchedReceipt ? `receipt_${t.matchedReceipt.index}_${t.date.replace(/\//g, '_')}.png` : '';
+            // Create worksheet data
+            const wb = XLSX.utils.book_new();
+            const ws_data = [
+                ['Date', 'Merchant', 'Original Amount', 'Original Currency', 'Amount (USD)', 'Location', 'Match Status', 'Receipt'],
+                ...await Promise.all(transactions.map(async (t) => {
+                    const usdAmount = await convertToUSD(
+                        t.matchedReceipt ? t.matchedReceipt.amount : t.sourceAmount,
+                        t.date,
+                        t.matchedReceipt ? t.matchedReceipt.currency : t.sourceCurrency
+                    );
+                    const status = t.matched ? 'Matched' : 'No Match';
+                    const receiptFilename = t.matchedReceipt ? `receipt_${t.matchedReceipt.index}_${t.date.replace(/\//g, '_')}.png` : '';
+                    const receiptHyperlink = receiptFilename ? `=HYPERLINK("./${receiptFilename}", "${receiptFilename}")` : '';
 
-                csvContent += [
-                    `"${t.date}"`,
-                    `"${t.merchant}"`,
-                    `"${t.sourceAmount}"`,
-                    `"${t.sourceCurrency}"`,
-                    `"${usdAmount}"`,
-                    `"${t.location}"`,
-                    `"${status}"`,
-                    `"${receiptFilename}"`
-                ].join(',') + '\n';
-            }
+                    return [
+                        t.date,
+                        t.merchant,
+                        t.sourceAmount,
+                        t.sourceCurrency,
+                        usdAmount,
+                        t.location,
+                        status,
+                        receiptHyperlink
+                    ];
+                }))
+            ];
+
+            const ws = XLSX.utils.aoa_to_sheet(ws_data);
+            XLSX.utils.book_append_sheet(wb, ws, 'Expenses');
+
+            // Generate Excel binary
+            const excelBuffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+            const excelBlob = new Blob([excelBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 
             const zip = new JSZip();
-            const csvBlob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-            zip.file('expense_report.csv', csvBlob);
+            zip.file('expense_report.xlsx', excelBlob);
 
+            // Add individual receipt images to the ZIP
             receipts.forEach(receipt => {
                 if (receipt.imageData) {
                     zip.file(`receipt_${receipt.index}_${receipt.date.replace(/\//g, '_')}.png`, receipt.imageData.split(',')[1], { base64: true });
