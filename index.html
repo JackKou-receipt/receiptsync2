@@ -47,7 +47,7 @@
 
     <div class="section">
         <h3>Step 3: Generate Report</h3>
-        <button onclick="generateZip()">Download ZIP (Excel Report + Receipts)</button>
+        <button onclick="generateZip()">Download ZIP (Excel + HTML Report + Receipts)</button>
     </div>
 
     <div class="section">
@@ -278,7 +278,7 @@
             output.innerHTML = html;
         }
 
-        // Generate and download ZIP with Excel report and receipts
+        // Generate and download ZIP with Excel and HTML report and receipts
         async function generateZip() {
             if (!transactions.length) {
                 console.log('No transactions to process.');
@@ -287,7 +287,7 @@
 
             matchTransactionsToReceipts();
 
-            // Create worksheet data
+            // Create Excel worksheet data
             const wb = XLSX.utils.book_new();
             const ws_data = [
                 ['Date', 'Merchant', 'Original Amount', 'Original Currency', 'Amount (USD)', 'Location', 'Match Status', 'Receipt'],
@@ -299,7 +299,6 @@
                     );
                     const status = t.matched ? 'Matched' : 'No Match';
                     const receiptFilename = t.matchedReceipt ? `receipt_${t.matchedReceipt.index}_${t.date.replace(/\//g, '_')}.png` : '';
-                    const receiptHyperlink = receiptFilename ? `=HYPERLINK("./${receiptFilename}", "${receiptFilename}")` : '';
 
                     return [
                         t.date,
@@ -309,7 +308,7 @@
                         usdAmount,
                         t.location,
                         status,
-                        receiptHyperlink
+                        receiptFilename // Removed hyperlink, just filename for manual insertion
                     ];
                 }))
             ];
@@ -321,8 +320,74 @@
             const excelBuffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
             const excelBlob = new Blob([excelBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 
+            // Create HTML report
+            let htmlContent = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Expense Report</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        table {
+            border-collapse: collapse;
+            width: 100%;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        th { background-color: #f2f2f2; }
+    </style>
+</head>
+<body>
+    <h1>Expense Report</h1>
+    <table>
+        <tr>
+            <th>Date</th>
+            <th>Merchant</th>
+            <th>Original Amount</th>
+            <th>Original Currency</th>
+            <th>Amount (USD)</th>
+            <th>Location</th>
+            <th>Match Status</th>
+            <th>Receipt</th>
+        </tr>`;
+
+            for (let t of transactions) {
+                const usdAmount = await convertToUSD(
+                    t.matchedReceipt ? t.matchedReceipt.amount : t.sourceAmount,
+                    t.date,
+                    t.matchedReceipt ? t.matchedReceipt.currency : t.sourceCurrency
+                );
+                const status = t.matched ? 'Matched' : 'No Match';
+                const imageData = t.matchedReceipt ? t.matchedReceipt.imageData : '';
+
+                htmlContent += `
+        <tr>
+            <td>${t.date}</td>
+            <td>${t.merchant}</td>
+            <td>${t.sourceAmount}</td>
+            <td>${t.sourceCurrency}</td>
+            <td>${usdAmount}</td>
+            <td>${t.location}</td>
+            <td>${status}</td>
+            <td>${imageData ? `<img src="${imageData}" width="100">` : ''}</td>
+        </tr>`;
+            }
+
+            htmlContent += `
+    </table>
+</body>
+</html>`;
+
+            const htmlBlob = new Blob([htmlContent], { type: 'text/html;charset=utf-8;' });
+
             const zip = new JSZip();
             zip.file('expense_report.xlsx', excelBlob);
+            zip.file('expense_report.html', htmlBlob);
 
             // Add individual receipt images to the ZIP
             receipts.forEach(receipt => {
