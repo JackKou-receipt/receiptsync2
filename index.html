@@ -184,7 +184,6 @@
                         merchant: t['Vendor Name'] || 'Unknown',
                         sourceAmount: t['Source Amount'] || '0',
                         sourceCurrency: t['Source Currency'] || 'USD',
-                        location: t['LOCATION'] || 'Unknown',
                         matched: false,
                         matchedReceipt: null
                     })).filter(t => t.date !== 'Unknown' && t.sourceAmount !== '0');
@@ -199,38 +198,40 @@
             });
         }
 
-        // Convert to USD using approximated VISA rates
+        // Convert to USD using exchange rate for the transaction date
         async function convertToUSD(amount, date, currency) {
-            console.log(`Converting ${amount} ${currency} on ${date}`);
+            console.log(`Converting ${amount} ${currency} on ${date} for merchant`);
             if (date === 'No date' || !parseFloat(amount)) {
                 console.log('Invalid date or amount, returning 0.00');
-                return '0.00';
+                return { usdAmount: '0.00', rate: 'N/A' };
             }
             if (currency === 'USD') {
                 console.log('Currency is USD, no conversion needed');
-                return parseFloat(amount).toFixed(2);
+                return { usdAmount: parseFloat(amount).toFixed(2), rate: '1.00' };
             }
 
             const [month, day, year] = date.split('/');
             const formattedDate = `20${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
+            let rate = 1.0;
             try {
-                const response = await fetch(`https://api.exchangerate-api.com/v4/${formattedDate}/USD`);
+                const response = await fetch(`https://api.exchangerate-api.com/v4/historical/${formattedDate}/USD`);
                 const data = await response.json();
-                const rate = data.rates[currency];
+                rate = data.rates[currency] || 1.0;
                 if (!rate) throw new Error('Rate not found');
-                const usdAmount = (parseFloat(amount) / rate).toFixed(2);
-                console.log(`Converted ${amount} ${currency} to ${usdAmount} USD using rate ${rate}`);
-                return usdAmount;
+                console.log(`Fetched rate for ${formattedDate}: ${rate}`);
             } catch (error) {
                 console.error('Rate fetch failed:', error);
                 if (currency === 'TWD') {
-                    const usdAmount = (parseFloat(amount) * 0.0302).toFixed(2);
-                    console.log(`Fallback: Converted ${amount} TWD to ${usdAmount} USD using rate 0.0302`);
-                    return usdAmount;
+                    rate = 0.0302; // Fallback rate for TWD based on recent average
+                    console.log(`Fallback: Using rate ${rate} for ${currency} on ${formattedDate}`);
+                } else {
+                    console.log(`No fallback rate for ${currency}, returning unconverted amount`);
+                    return { usdAmount: amount, rate: 'N/A' };
                 }
-                console.log('Returning unconverted amount due to error');
-                return amount;
             }
+            const usdAmount = (parseFloat(amount) / rate).toFixed(2);
+            console.log(`Converted ${amount} ${currency} to ${usdAmount} USD using rate ${rate}`);
+            return { usdAmount, rate: rate.toFixed(4) };
         }
 
         // Match transactions to receipts
@@ -257,7 +258,6 @@
                     t.matched = true;
                     t.matchedReceipt = receiptMatch;
                     receiptMatch.matched = true;
-                    // Update transaction's amount and currency to match the receipt's
                     t.sourceAmount = receiptMatch.amount;
                     t.sourceCurrency = receiptMatch.currency;
                     console.log(`Matched ${t.merchant} on ${t.date}: Updated to ${t.sourceAmount} ${t.sourceCurrency}`);
@@ -271,15 +271,16 @@
             matchTransactionsToReceipts();
 
             const output = document.getElementById('output');
-            let html = '<table><tr><th>Date</th><th>Merchant</th><th>Original Amount</th><th>Original Currency</th><th>Amount (USD)</th><th>Location</th><th>Match Status</th><th>Receipt</th></tr>';
+            let html = '<table><tr><th>Date</th><th>Merchant</th><th>Original Amount</th><th>Original Currency</th><th>Amount (USD)</th><th>Conversion Rate</th><th>Match Status</th><th>Receipt</th></tr>';
 
             for (let t of transactions) {
-                const usdAmount = await convertToUSD(
+                const { usdAmount, rate } = await convertToUSD(
                     t.matchedReceipt ? t.matchedReceipt.amount : t.sourceAmount,
                     t.date,
                     t.matchedReceipt ? t.matchedReceipt.currency : t.sourceCurrency
                 );
                 t.usdAmount = usdAmount; // Store for later use
+                t.conversionRate = rate; // Store conversion rate
                 const status = t.matched ? 'Matched' : 'No Match';
 
                 html += `<tr>
@@ -288,7 +289,7 @@
                     <td>${t.sourceAmount}</td>
                     <td>${t.sourceCurrency}</td>
                     <td>${usdAmount}</td>
-                    <td>${t.location}</td>
+                    <td>${rate}</td>
                     <td>${status}</td>
                     <td>${t.matchedReceipt ? `<img src="${t.matchedReceipt.imageData}" width="100">` : ''}</td>
                 </tr>`;
@@ -307,22 +308,23 @@
             matchTransactionsToReceipts();
 
             try {
-                // Pre-compute USD amounts for all transactions
-                console.log('Pre-computing USD amounts...');
+                // Pre-compute USD amounts and rates for all transactions
+                console.log('Pre-computing USD amounts and rates...');
                 for (let t of transactions) {
-                    const usdAmount = await convertToUSD(
+                    const { usdAmount, rate } = await convertToUSD(
                         t.matchedReceipt ? t.matchedReceipt.amount : t.sourceAmount,
                         t.date,
                         t.matchedReceipt ? t.matchedReceipt.currency : t.sourceCurrency
                     );
                     t.usdAmount = usdAmount;
+                    t.conversionRate = rate;
                 }
 
                 // Create Excel worksheet data
                 console.log('Generating Excel data...');
                 const wb = XLSX.utils.book_new();
                 const ws_data = [
-                    ['Date', 'Merchant', 'Original Amount', 'Original Currency', 'Amount (USD)', 'Location', 'Match Status', 'Receipt'],
+                    ['Date', 'Merchant', 'Original Amount', 'Original Currency', 'Amount (USD)', 'Conversion Rate', 'Match Status', 'Receipt'],
                     ...transactions.map(t => {
                         const status = t.matched ? 'Matched' : 'No Match';
                         const receiptFilename = t.matchedReceipt ? `receipt_${t.matchedReceipt.index}_${t.date.replace(/\//g, '_')}.png` : '';
@@ -332,9 +334,9 @@
                             t.sourceAmount,
                             t.sourceCurrency,
                             t.usdAmount,
-                            t.location,
+                            t.conversionRate,
                             status,
-                            receiptFilename // Just filename, no hyperlink
+                            receiptFilename
                         ];
                     })
                 ];
@@ -378,7 +380,7 @@
             <th>Original Amount</th>
             <th>Original Currency</th>
             <th>Amount (USD)</th>
-            <th>Location</th>
+            <th>Conversion Rate</th>
             <th>Match Status</th>
             <th>Receipt</th>
         </tr>`;
@@ -393,7 +395,7 @@
             <td>${t.sourceAmount}</td>
             <td>${t.sourceCurrency}</td>
             <td>${t.usdAmount}</td>
-            <td>${t.location}</td>
+            <td>${t.conversionRate}</td>
             <td>${status}</td>
             <td>${imageData ? `<img src="${imageData}" width="100">` : ''}</td>
         </tr>`;
