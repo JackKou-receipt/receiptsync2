@@ -201,8 +201,15 @@
 
         // Convert to USD using approximated VISA rates
         async function convertToUSD(amount, date, currency) {
-            if (date === 'No date' || !parseFloat(amount)) return '0.00';
-            if (currency === 'USD') return parseFloat(amount).toFixed(2);
+            console.log(`Converting ${amount} ${currency} on ${date}`);
+            if (date === 'No date' || !parseFloat(amount)) {
+                console.log('Invalid date or amount, returning 0.00');
+                return '0.00';
+            }
+            if (currency === 'USD') {
+                console.log('Currency is USD, no conversion needed');
+                return parseFloat(amount).toFixed(2);
+            }
 
             const [month, day, year] = date.split('/');
             const formattedDate = `20${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
@@ -211,10 +218,17 @@
                 const data = await response.json();
                 const rate = data.rates[currency];
                 if (!rate) throw new Error('Rate not found');
-                return (parseFloat(amount) / rate).toFixed(2);
+                const usdAmount = (parseFloat(amount) / rate).toFixed(2);
+                console.log(`Converted ${amount} ${currency} to ${usdAmount} USD using rate ${rate}`);
+                return usdAmount;
             } catch (error) {
                 console.error('Rate fetch failed:', error);
-                if (currency === 'TWD') return (parseFloat(amount) * 0.0302).toFixed(2);
+                if (currency === 'TWD') {
+                    const usdAmount = (parseFloat(amount) * 0.0302).toFixed(2);
+                    console.log(`Fallback: Converted ${amount} TWD to ${usdAmount} USD using rate 0.0302`);
+                    return usdAmount;
+                }
+                console.log('Returning unconverted amount due to error');
                 return amount;
             }
         }
@@ -243,6 +257,10 @@
                     t.matched = true;
                     t.matchedReceipt = receiptMatch;
                     receiptMatch.matched = true;
+                    // Update transaction's amount and currency to match the receipt's
+                    t.sourceAmount = receiptMatch.amount;
+                    t.sourceCurrency = receiptMatch.currency;
+                    console.log(`Matched ${t.merchant} on ${t.date}: Updated to ${t.sourceAmount} ${t.sourceCurrency}`);
                 }
             }
             console.log('Matched transactions:', transactions);
@@ -261,6 +279,7 @@
                     t.date,
                     t.matchedReceipt ? t.matchedReceipt.currency : t.sourceCurrency
                 );
+                t.usdAmount = usdAmount; // Store for later use
                 const status = t.matched ? 'Matched' : 'No Match';
 
                 html += `<tr>
@@ -287,41 +306,49 @@
 
             matchTransactionsToReceipts();
 
-            // Create Excel worksheet data
-            const wb = XLSX.utils.book_new();
-            const ws_data = [
-                ['Date', 'Merchant', 'Original Amount', 'Original Currency', 'Amount (USD)', 'Location', 'Match Status', 'Receipt'],
-                ...await Promise.all(transactions.map(async (t) => {
+            try {
+                // Pre-compute USD amounts for all transactions
+                console.log('Pre-computing USD amounts...');
+                for (let t of transactions) {
                     const usdAmount = await convertToUSD(
                         t.matchedReceipt ? t.matchedReceipt.amount : t.sourceAmount,
                         t.date,
                         t.matchedReceipt ? t.matchedReceipt.currency : t.sourceCurrency
                     );
-                    const status = t.matched ? 'Matched' : 'No Match';
-                    const receiptFilename = t.matchedReceipt ? `receipt_${t.matchedReceipt.index}_${t.date.replace(/\//g, '_')}.png` : '';
+                    t.usdAmount = usdAmount;
+                }
 
-                    return [
-                        t.date,
-                        t.merchant,
-                        t.sourceAmount,
-                        t.sourceCurrency,
-                        usdAmount,
-                        t.location,
-                        status,
-                        receiptFilename // Removed hyperlink, just filename for manual insertion
-                    ];
-                }))
-            ];
+                // Create Excel worksheet data
+                console.log('Generating Excel data...');
+                const wb = XLSX.utils.book_new();
+                const ws_data = [
+                    ['Date', 'Merchant', 'Original Amount', 'Original Currency', 'Amount (USD)', 'Location', 'Match Status', 'Receipt'],
+                    ...transactions.map(t => {
+                        const status = t.matched ? 'Matched' : 'No Match';
+                        const receiptFilename = t.matchedReceipt ? `receipt_${t.matchedReceipt.index}_${t.date.replace(/\//g, '_')}.png` : '';
+                        return [
+                            t.date,
+                            t.merchant,
+                            t.sourceAmount,
+                            t.sourceCurrency,
+                            t.usdAmount,
+                            t.location,
+                            status,
+                            receiptFilename // Just filename, no hyperlink
+                        ];
+                    })
+                ];
 
-            const ws = XLSX.utils.aoa_to_sheet(ws_data);
-            XLSX.utils.book_append_sheet(wb, ws, 'Expenses');
+                const ws = XLSX.utils.aoa_to_sheet(ws_data);
+                XLSX.utils.book_append_sheet(wb, ws, 'Expenses');
 
-            // Generate Excel binary
-            const excelBuffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
-            const excelBlob = new Blob([excelBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+                // Generate Excel binary
+                const excelBuffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+                const excelBlob = new Blob([excelBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 
-            // Create HTML report
-            let htmlContent = `
+                // Create HTML report
+                console.log('Generating HTML report...');
+                let htmlContent = `
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -356,48 +383,51 @@
             <th>Receipt</th>
         </tr>`;
 
-            for (let t of transactions) {
-                const usdAmount = await convertToUSD(
-                    t.matchedReceipt ? t.matchedReceipt.amount : t.sourceAmount,
-                    t.date,
-                    t.matchedReceipt ? t.matchedReceipt.currency : t.sourceCurrency
-                );
-                const status = t.matched ? 'Matched' : 'No Match';
-                const imageData = t.matchedReceipt ? t.matchedReceipt.imageData : '';
-
-                htmlContent += `
+                transactions.forEach(t => {
+                    const status = t.matched ? 'Matched' : 'No Match';
+                    const imageData = t.matchedReceipt ? t.matchedReceipt.imageData : '';
+                    htmlContent += `
         <tr>
             <td>${t.date}</td>
             <td>${t.merchant}</td>
             <td>${t.sourceAmount}</td>
             <td>${t.sourceCurrency}</td>
-            <td>${usdAmount}</td>
+            <td>${t.usdAmount}</td>
             <td>${t.location}</td>
             <td>${status}</td>
             <td>${imageData ? `<img src="${imageData}" width="100">` : ''}</td>
         </tr>`;
-            }
+                });
 
-            htmlContent += `
+                htmlContent += `
     </table>
 </body>
 </html>`;
 
-            const htmlBlob = new Blob([htmlContent], { type: 'text/html;charset=utf-8;' });
+                console.log('HTML content generated, creating blob...');
+                const htmlBlob = new Blob([htmlContent], { type: 'text/html;charset=utf-8;' });
 
-            const zip = new JSZip();
-            zip.file('expense_report.xlsx', excelBlob);
-            zip.file('expense_report.html', htmlBlob);
+                // Create ZIP
+                console.log('Creating ZIP file...');
+                const zip = new JSZip();
+                zip.file('expense_report.xlsx', excelBlob);
+                zip.file('expense_report.html', htmlBlob);
 
-            // Add individual receipt images to the ZIP
-            receipts.forEach(receipt => {
-                if (receipt.imageData) {
-                    zip.file(`receipt_${receipt.index}_${receipt.date.replace(/\//g, '_')}.png`, receipt.imageData.split(',')[1], { base64: true });
-                }
-            });
+                // Add individual receipt images to the ZIP
+                receipts.forEach(receipt => {
+                    if (receipt.imageData) {
+                        zip.file(`receipt_${receipt.index}_${receipt.date.replace(/\//g, '_')}.png`, receipt.imageData.split(',')[1], { base64: true });
+                    }
+                });
 
-            const zipBlob = await zip.generateAsync({ type: 'blob' });
-            saveAs(zipBlob, 'receipts_report.zip');
+                console.log('Generating ZIP blob...');
+                const zipBlob = await zip.generateAsync({ type: 'blob' });
+                console.log('ZIP generated, triggering download...');
+                saveAs(zipBlob, 'receipts_report.zip');
+            } catch (error) {
+                console.error('Error generating ZIP:', error);
+                alert('Failed to generate ZIP file. Check console for details.');
+            }
         }
     </script>
 </body>
